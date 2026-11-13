@@ -123,6 +123,14 @@ impl Dos {
         Ok(())
     }
 
+    /// The time and date now in the form a directory entry keeps them.
+    fn stamp_now(&self) -> (u16, u16) {
+        let (t, _) = self.now();
+        let time = ((t.hour as u16) << 11) | ((t.minute as u16) << 5) | (t.second as u16 / 2);
+        let date = (t.year.saturating_sub(1980) << 9) | ((t.month as u16) << 5) | t.day as u16;
+        (time, date)
+    }
+
     /// EXEC (AH=4Bh AL=0): load a program as a child of the caller and start
     /// it. The caller resumes, with AX=0 and carry clear, when the child ends.
     fn spawn(&mut self, r: &mut Regs, mem: &mut Mem) -> DosResult {
@@ -210,7 +218,12 @@ impl Dos {
             Target::Null => Handle::Null,
             Target::File(name) => {
                 let slot = match (self.volume.slot(&name), create) {
-                    (_, true) => self.volume.put(&name, Vec::new()),
+                    (_, true) => {
+                        let slot = self.volume.put(&name, Vec::new());
+                        let stamp = self.stamp_now();
+                        self.volume.set_stamp(slot, stamp);
+                        slot
+                    }
                     (Some(slot), false) => slot,
                     (None, false) => return Err(files::ERR_FILE_NOT_FOUND),
                 };
@@ -285,6 +298,8 @@ impl Dos {
             Handle::File { slot, pos, .. } => {
                 let (start, end) = (pos as usize, pos as usize + data.len());
                 let free = self.volume.free();
+                let stamp = self.stamp_now();
+                self.volume.set_stamp(slot, stamp);
                 if let Some(file) = self.volume.data_mut(slot) {
                     if end.saturating_sub(file.len()) > free {
                         // Disk full. DOS reports it as a short write.
@@ -539,6 +554,18 @@ impl Dos {
             }
             0x2F => {
                 (r.es, r.bx) = self.dta;
+                return Outcome::Resume;
+            }
+            0x2A => {
+                let (now, _) = self.now();
+                (r.cx, r.dx) = (now.year, u16::from_be_bytes([now.month, now.day]));
+                r.set_al(now.weekday());
+                return Outcome::Resume;
+            }
+            0x2C => {
+                let (now, hundredths) = self.now();
+                r.cx = u16::from_be_bytes([now.hour, now.minute]);
+                r.dx = u16::from_be_bytes([now.second, hundredths]);
                 return Outcome::Resume;
             }
             0x30 => {

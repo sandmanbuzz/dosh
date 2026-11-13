@@ -79,9 +79,10 @@ fn supervise(provision: boot::Provision) -> ! {
 
     let mut capsules: Vec<Capsule> = Vec::new();
     if let Some(hv) = &hv {
+        let wall_clock = provision.wall_clock;
         for (id, spec) in provision.capsules.into_iter().enumerate() {
             let endpoint = present::Endpoint::for_capsule(id);
-            capsules.push(Capsule::launch(id, hv, spec, endpoint));
+            capsules.push(Capsule::launch(id, hv, spec, endpoint, wall_clock));
         }
     }
 

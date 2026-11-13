@@ -112,6 +112,13 @@ def test_a_program_starts_children_and_resumes(dosh):
     assert exited(result) == 0
 
 
+def test_dos_date_and_time_come_from_the_wall_clock(dosh):
+    # The lab sets the virtual RTC to Monday 2031-02-03 12:00:00.
+    result = dosh("DATE.COM")
+    assert result.consoles[0].startswith(b"2031-02-03 1 12:"), result.consoles[0]
+    assert exited(result) == 0
+
+
 def test_mz_executable_is_relocated_and_runs(dosh):
     result = dosh("HELLOMZ.EXE")
     assert result.consoles[0] == b"Hello from an MZ executable\r\nand from its second code segment\r\n"

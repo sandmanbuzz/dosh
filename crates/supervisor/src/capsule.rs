@@ -9,7 +9,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use dosh_dos::{firmware, video, Dos, Fault, Mem, Outcome, Regs, Volume, RAM_SIZE};
+use dosh_dos::{firmware, video, DateTime, Dos, Fault, Mem, Outcome, Regs, Volume, RAM_SIZE};
 
 use crate::boot::CapsuleSpec;
 use crate::device::{Cga, Console};
@@ -108,7 +108,7 @@ impl Capsule {
     /// Build a capsule and load its program. A capsule whose program cannot
     /// be loaded is created already faulted, so it is accounted for like any
     /// other.
-    pub fn launch(id: usize, hv: &hv::Hv, spec: CapsuleSpec, endpoint: Endpoint) -> Self {
+    pub fn launch(id: usize, hv: &hv::Hv, spec: CapsuleSpec, endpoint: Endpoint, wall_clock: Option<DateTime>) -> Self {
         let mut vm = hv.create_vm(RAM_SIZE);
         let stocked: usize = spec.files.iter().map(|(_, data)| data.len()).sum();
         let mut volume = Volume::new(stocked + DISK_ROOM);
@@ -118,6 +118,9 @@ impl Capsule {
         let stocked = volume.names().map(|n| (n.to_string(), fnv1a(volume.get(n).unwrap_or_default()))).collect();
         let mut mem = Mem::new(vm.ram());
         let mut dos = Dos::new(&mut mem, volume);
+        if let Some(at_boot) = wall_clock {
+            dos.set_calendar(at_boot);
+        }
         let loaded = dos.exec(&mut mem, &spec.program, &spec.tail);
 
         log!("capsule id={id} event=create program={} console={}", spec.program, endpoint.name());

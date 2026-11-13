@@ -36,6 +36,8 @@ pub struct CapsuleSpec {
 #[derive(Default)]
 pub struct Provision {
     pub capsules: Vec<CapsuleSpec>,
+    /// The firmware's clock when the supervisor started, if it has one.
+    pub wall_clock: Option<dosh_dos::DateTime>,
     pub error: Option<String>,
 }
 
@@ -45,9 +47,17 @@ pub fn provision() -> Provision {
     // SAFETY: the pool is ours alone and is never returned to the firmware.
     unsafe { HEAP.lock().init(pool.as_ptr(), POOL_BYTES) };
 
+    let wall_clock = uefi::runtime::get_time().ok().map(|t| dosh_dos::DateTime {
+        year: t.year(),
+        month: t.month(),
+        day: t.day(),
+        hour: t.hour(),
+        minute: t.minute(),
+        second: t.second(),
+    });
     match read_esp() {
-        Ok(capsules) => Provision { capsules, error: None },
-        Err(error) => Provision { capsules: Vec::new(), error: Some(error) },
+        Ok(capsules) => Provision { capsules, wall_clock, error: None },
+        Err(error) => Provision { capsules: Vec::new(), wall_clock, error: Some(error) },
     }
 }
 

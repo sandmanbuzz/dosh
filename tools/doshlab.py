@@ -231,7 +231,7 @@ def run(
         pairs = [socket.socketpair() for _ in range(CONSOLE_PORTS)]
         cmd = [
             "qemu-system-x86_64", *machine,
-            "-m", "256", "-nodefaults", "-display", "none", "-no-reboot",
+            "-m", "256", "-rtc", "base=2031-02-03T12:00:00,clock=vm", "-nodefaults", "-display", "none", "-no-reboot",
             "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={OVMF_CODE}",
             "-drive", f"if=pflash,format=raw,unit=1,file={workdir / 'vars.fd'}",
             "-drive", f"if=none,id=esp,format=raw,file={workdir / 'esp.img'}",

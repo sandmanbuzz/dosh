@@ -22,6 +22,7 @@
 extern crate alloc;
 
 mod arena;
+mod calendar;
 mod exec;
 mod fcb;
 mod files;
@@ -36,6 +37,7 @@ pub mod video;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+pub use calendar::DateTime;
 pub use exec::LoadError;
 pub use files::Volume;
 pub use mem::{Mem, RAM_SIZE};
@@ -128,6 +130,10 @@ pub struct Dos {
     parents: Vec<Parent>,
     /// How the last child ended, for INT 21h/4Dh.
     child_code: u16,
+    /// What the wall clock read when the supervisor's tick count was zero.
+    calendar: DateTime,
+    /// The supervisor's tick count at the last clock update, in 1/100 s.
+    hz100: u64,
     volume: Volume,
     psp: u16,
     dta: (u16, u16),
@@ -169,6 +175,8 @@ impl Dos {
         Self {
             parents: Vec::new(),
             child_code: 0,
+            calendar: calendar::DOS_EPOCH,
+            hz100: 0,
             volume,
             psp: 0,
             dta: (0, 0x80),
@@ -210,6 +218,7 @@ impl Dos {
     /// Returns whether the BIOS count has advanced since the last call: that
     /// is one `INT 08h` for the guest, however many ticks were missed.
     pub fn set_clock(&mut self, mem: &mut Mem, hz100: u64) -> bool {
+        self.hz100 = hz100;
         let count = firmware::ticks_at(hz100);
         let advanced = count != self.bios_ticks;
         if count < self.bios_ticks {
@@ -218,6 +227,17 @@ impl Dos {
         self.bios_ticks = count;
         firmware::write_ticks(mem, count);
         advanced
+    }
+
+    /// Say what the wall clock read when the supervisor's tick count was
+    /// zero. Until then a capsule's calendar starts at 1980-01-01 00:00:00.
+    pub fn set_calendar(&mut self, at_boot: DateTime) {
+        self.calendar = at_boot;
+    }
+
+    /// The date and time now, and hundredths of a second.
+    pub(crate) fn now(&self) -> (DateTime, u8) {
+        (self.calendar.plus(self.hz100 / 100), (self.hz100 % 100) as u8)
     }
 
     /// Load `program` from C: as the capsule's root process. Returns the
