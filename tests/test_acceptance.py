@@ -137,6 +137,27 @@ def test_the_watchdog_stops_a_capsule_that_never_ends(dosh):
     assert exited(result, 1) == 0 and result.consoles[1] == b"Hello from DOS!\r\n"
 
 
+def test_one_line_carries_many_capsules_one_at_a_time(dosh):
+    # Capsule 1 says hello and ends while the line shows others. Its text is
+    # held, and arrives after its banner when the line is moved to it.
+    script = [
+        (b"", b"left\r"),
+        (b"LEFT", b"\x1d2"),  # Ctrl-] 2
+        (b"capsule 2 ---", b"right\r"),
+        (b"RIGHT", b"\x1d1"),
+        (b"Hello from DOS!", b"\x1d0\x1a\r\x1d2\x1a\r"),
+    ]
+    result = dosh("UPPER.COM", "HELLO.COM", "UPPER.COM", stdin=[script], mux=True)
+    line = result.consoles[0]
+    zero, two, one = (line.partition(b"--- DOSH capsule 2 ---\r\n")[0],) + line.partition(b"--- DOSH capsule 2 ---\r\n")[2].partition(
+        b"--- DOSH capsule 1 ---\r\n"
+    )[::2]
+    assert b"LEFT" in zero and b"RIGHT" not in zero
+    assert b"RIGHT" in two and b"Hello" not in two
+    assert one.startswith(b"Hello from DOS!\r\n"), line
+    assert [exited(result, i) for i in range(3)] == [0, 0, 0]
+
+
 def test_dos_date_and_time_come_from_the_wall_clock(dosh):
     # The lab sets the virtual RTC to Monday 2031-02-03 12:00:00.
     result = dosh("DATE.COM")
@@ -406,6 +427,26 @@ def test_screen_program_draws_and_reads_a_key(dosh):
     assert screen[5] == "Direct store", "a direct store into B800:0000"
     assert screen[6] == "╔", "code page 437 glyphs reach the terminal"
     assert screen[8] == "scan=48"
+
+
+def test_a_screen_is_redrawn_when_its_capsule_is_shown_again(dosh):
+    up_arrow = b"\x1b[A"
+    script = [
+        (b"Direct store", b"\x1d1"),
+        (b"Direct store", b"\x1d0"),  # capsule 1 has drawn its screen
+        (b"capsule 0 ---", up_arrow),  # back on capsule 0: its screen is drawn afresh, then it ends
+        (b"scan=48", b"\x1d1" + up_arrow),
+    ]
+    result = dosh("SCREEN.COM", "SCREEN.COM", stdin=[script], mux=True, timeout=60)
+    assert [exited(result, i) for i in range(2)] == [0x48, 0x48]
+    first, _, rest = result.consoles[0].partition(b"\r\n--- DOSH capsule 1 ---\r\n")
+    second, _, again = rest.partition(b"\r\n--- DOSH capsule 0 ---\r\n")
+    drawn = doshlab.render_screen(first)
+    assert drawn[2] == " " * 10 + "Hello, screen" and drawn[5] == "Direct store"
+    assert doshlab.render_screen(second)[:7] == drawn[:7], "capsule 1 shows the same program"
+    # Capsule 0 comes back with nothing carried over from capsule 1's drawing.
+    last = doshlab.render_screen(again.partition(b"--- DOSH capsule 1 ---")[0])
+    assert last[:7] == drawn[:7] and last[8] == "scan=48", "\n".join(last)
 
 
 def test_screen_programs_start_as_a_byte_stream(dosh):

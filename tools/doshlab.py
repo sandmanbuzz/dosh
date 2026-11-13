@@ -198,6 +198,7 @@ def run(
     manifest: str | None = None,
     attach: bool = False,
     nmi: bool = False,
+    mux: bool = False,
     timeout: float = 120,
     keep: Path | None = None,
 ) -> Result:
@@ -206,7 +207,8 @@ def run(
 
     `stdin[i]` is sent to capsule i's console. `files` adds to drive C:,
     which always holds the programs named in `runs`. `cpu` overrides the
-    CPU model; `manifest` replaces the generated boot manifest verbatim.
+    CPU model; `manifest` replaces the generated boot manifest verbatim. `mux` puts every
+    capsule on the first console line, switched with Ctrl-] and a number.
     `attach` connects capsule 0's console to this process's own terminal
     instead of capturing it (firmware output included, as on a real line).
     `nmi` injects one non-maskable interrupt once the first capsule has
@@ -221,7 +223,7 @@ def run(
     with tempfile.TemporaryDirectory(prefix="dosh-run-") as tmp:
         workdir = Path(tmp)
         if manifest is None:
-            manifest = "".join(f"run {line}\n" for line in runs)
+            manifest = ("console mux\n" if mux else "") + "".join(f"run {line}\n" for line in runs)
         build_disk(workdir / "esp.img", manifest, files)
         shutil.copy(OVMF_VARS, workdir / "vars.fd")
         machine = list(ACCELS[accel])

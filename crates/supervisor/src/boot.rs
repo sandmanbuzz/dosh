@@ -38,6 +38,8 @@ pub struct CapsuleSpec {
 #[derive(Default)]
 pub struct Provision {
     pub capsules: Vec<CapsuleSpec>,
+    /// Whether every capsule is presented on one line, a capsule at a time.
+    pub shared_console: bool,
     /// The firmware's clock when the supervisor started, if it has one.
     pub wall_clock: Option<dosh_dos::DateTime>,
     pub error: Option<String>,
@@ -58,12 +60,12 @@ pub fn provision() -> Provision {
         second: t.second(),
     });
     match read_esp() {
-        Ok(capsules) => Provision { capsules, wall_clock, error: None },
-        Err(error) => Provision { capsules: Vec::new(), wall_clock, error: Some(error) },
+        Ok((capsules, shared_console)) => Provision { capsules, shared_console, wall_clock, error: None },
+        Err(error) => Provision { capsules: Vec::new(), shared_console: false, wall_clock, error: Some(error) },
     }
 }
 
-fn read_esp() -> Result<Vec<CapsuleSpec>, String> {
+fn read_esp() -> Result<(Vec<CapsuleSpec>, bool), String> {
     let volume =
         uefi::boot::get_image_file_system(uefi::boot::image_handle()).map_err(|e| format!("boot volume: {e}"))?;
     let mut fs = FileSystem::new(volume);
@@ -83,7 +85,12 @@ fn read_esp() -> Result<Vec<CapsuleSpec>, String> {
     }
 
     let mut capsules = Vec::new();
+    let mut shared_console = false;
     for line in manifest.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        if line == "console mux" {
+            shared_console = true;
+            continue;
+        }
         let rest = line.strip_prefix("run ").ok_or_else(|| format!("BOOT.CFG: unknown directive: {line}"))?;
         let mut rest = rest.trim_start();
         let mut cpu_limit = None;
@@ -100,7 +107,7 @@ fn read_esp() -> Result<Vec<CapsuleSpec>, String> {
             files: files.clone(),
         });
     }
-    Ok(capsules)
+    Ok((capsules, shared_console))
 }
 
 /// The end of the highest region of actual memory in the firmware's map.

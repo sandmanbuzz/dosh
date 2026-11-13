@@ -29,7 +29,8 @@ boot services exist it does exactly two things: claims a fixed pool of
 memory (64 MiB) for everything it will ever allocate, and reads its work
 from the EFI system partition it booted from — `\DOSH\BOOT.CFG`, one
 `run [limit=SECONDS] PROGRAM [arguments]` line per capsule, and `\DOSH\C\`, the files each
-capsule finds on drive C:. `limit=` is a watchdog: a capsule that has used
+capsule finds on drive C:. A `console mux` line puts every capsule on one
+serial line, switched with Ctrl-] and a number (see `present.rs`). `limit=` is a watchdog: a capsule that has used
 that much processor time (ticks that found it running, not time spent idle or
 waiting for input) is stopped with a fault that says so. It also reads the
 firmware's wall clock once, which DOS date and time are kept from. Then it calls `ExitBootServices`. Nothing after
