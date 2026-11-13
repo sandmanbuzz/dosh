@@ -61,8 +61,7 @@ interrupts are disabled, because nothing would ever wake it.
   `SS:SP` set from the header. Data past the load module (overlays, debug
   information) is ignored. Inconsistent headers are refused.
 - **PSP**: `INT 20h` at 00h, top of memory at 02h, the CP/M call stub at
-  05h, saved vectors 22h–24h, parent PSP (itself: the program is the root
-  process), a 20-entry job file table, the environment segment at 2Ch,
+  05h, saved vectors 22h–24h, parent PSP (the starting process; the root process is its own parent), a 20-entry job file table, the environment segment at 2Ch,
   `INT 21h / RETF` at 50h, blank FCBs, and the command tail at 80h.
 - **Environment**: `PATH=C:\`, `COMSPEC=C:\COMMAND.COM`, then the
   program's full path, as DOS 3 and later provide.
@@ -93,7 +92,10 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 | 1Ah, 2Fh | Set / get disk transfer address | Find first/next keep their search state in it. |
 | 25h, 35h | Set / get interrupt vector | Act on the real vector table. |
 | 29h | Parse filename into an FCB | All four AL flags; wildcards set AL=1; drives other than C: are invalid (AL=FFh). |
+| 2Ah, 2Ch | Get date, get time | From the firmware's clock as it read when the supervisor started, advanced by elapsed time; 1980-01-01 00:00:00 if the firmware has none. Hundredths are the supervisor tick. Set date and set time (2Bh, 2Dh) fault by name. |
 | 30h | DOS version | 5.00. |
+| 39h, 3Ah | Make, remove directory | Access denied: there are no subdirectories. |
+| 3Bh, 47h | Change, get current directory | The root is the only directory: changing to it succeeds, anything else is path not found; the current directory is the empty string. |
 | 3Ch | Create file | Truncates an existing file. Attributes are ignored. |
 | 3Dh | Open file | Access mode honoured; sharing bits ignored. |
 | 3Eh | Close | |
@@ -104,7 +106,10 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 | 44h | IOCTL | 00h device information; 06h, 07h input and output status (a file is input-ready until its end). |
 | 45h, 46h | Duplicate handle, force duplicate | Duplicates share one open file, so one file position. |
 | 48h, 49h, 4Ah | Allocate, free, resize memory | First fit; free blocks coalesce. A failed grow leaves the block at its largest possible size, as DOS does. |
-| 4Ch | Exit with return code | Ends the capsule; the code is reported in the supervisor log. |
+| 4Ch | Exit with return code | Ends the program. A child's memory and handles are released and its parent resumes; the root program ends the capsule and its code is reported in the supervisor log. |
+| 43h | File attributes | Get reports archive (20h) for every file. Set accepts only that: nothing enforces read-only or hidden, so claiming it would be a lie. |
+| 4Bh | EXEC, AL=00h | Load and run a program as a child; the caller resumes with carry clear when it ends. The parameter block's environment (0 inherits), command tail and FCBs are honoured. The child gets the largest free block, so a program that wants to start one must give memory back (4Ah) first, as under DOS; otherwise error 8. The child shares the caller's open files (one file position per open file). AL=01h, 03h and 05h fault by name. |
+| 4Dh | Child's return code | AL is the code, AH 0 (normal termination); read once. |
 | 4Eh, 4Fh | Find first, find next | Wildcard patterns on the root directory; search attributes are ignored because every file is an ordinary one. Failure is error 2 on the first, 12h on the next. |
 | 51h, 62h | Get PSP | |
 | 56h | Rename | Within the root directory. Refuses wildcards, devices and an existing target. |
@@ -146,13 +151,13 @@ type-ahead flush and no Ctrl-C or Ctrl-Break handling.
 
 ## Known gaps a real program will hit soon
 
-In rough order of expected demand: date and time (2Ah, 2Ch, `INT 1Ah AH=02h`); text attributes beyond blink/intensity, video pages;
-file attributes (43h); directories (39h–3Bh, 47h);
-`EXEC` and child processes (4Bh, 4Dh); FCB file I/O; keyboard and video
-BIOS services (`INT 16h`, `INT 10h` beyond teletype); Ctrl-C and
-critical-error handling (`INT 23h`, `INT 24h`); country information (38h);
-terminate-and-stay-resident (31h).
-
+In rough order of expected demand: EXEC overlays and load-only (4Bh AL=03h,
+01h) and the child's own `INT 22h` terminate address; BIOS time of day
+(`INT 1Ah AH=02h`, `04h`); text attributes beyond blink/intensity, video
+pages; Ctrl-C and critical-error handling (`INT 23h`, `INT 24h`); country
+information (38h); terminate-and-stay-resident (31h). The PSP's job file
+table is not kept in step with the handles a process holds; no program has
+read it yet.
 
 ## The screen
 

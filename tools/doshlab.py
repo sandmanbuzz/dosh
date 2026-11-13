@@ -261,7 +261,15 @@ def run(
         # back until then, and nothing before it (firmware output) counts.
         consoles = [bytearray() for _ in ours]
         open_socks = dict(zip(ours, consoles))
-        unsent = {sock: data for sock, data in zip(ours, stdin or []) if data}
+        # Input is a script of (wait_for, send) steps; plain bytes are one
+        # step that goes out as soon as the session starts. A step waits until
+        # its marker has appeared in the output since the previous step.
+        unsent = {}
+        for sock, data in zip(ours, stdin or []):
+            steps = [(b"", data)] if isinstance(data, bytes) else list(data)
+            if steps and any(send for _, send in steps):
+                unsent[sock] = steps
+        mark = {sock: 0 for sock in ours}
         timed_out = False
         while open_socks:
             remaining = timeout - (time.monotonic() - started)
@@ -279,8 +287,18 @@ def run(
                 data = sock.recv(65536)
                 if data:
                     open_socks[sock] += data
-                    if sock in unsent and session_banner(ours.index(sock)) in open_socks[sock]:
-                        sock.sendall(unsent.pop(sock))
+                    seen = open_socks[sock]
+                    banner = session_banner(ours.index(sock))
+                    while sock in unsent and banner in seen:
+                        wait_for, send = unsent[sock][0]
+                        start = max(mark[sock], seen.index(banner) + len(banner))
+                        if wait_for not in seen[start:]:
+                            break
+                        sock.sendall(send)
+                        mark[sock] = len(seen)
+                        unsent[sock].pop(0)
+                        if not unsent[sock]:
+                            del unsent[sock]
                 else:
                     del open_socks[sock]
         qemu_output = (qemu.communicate()[0] or b"").decode(errors="replace")

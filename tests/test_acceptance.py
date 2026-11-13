@@ -437,3 +437,18 @@ def test_wordstar_saves_a_document(dosh):
     text = b"Hello from WordStar\r\n"
     saved = text + b"\x1a" * (128 - len(text))  # padded to a record with ^Z
     assert result.files() == {"NOTE.TXT": (len(saved), doshlab.fnv1a(saved))}
+
+
+def test_turbo_pascal_compiles_and_runs_a_program_started_from_the_shell(dosh):
+    """COMMAND.COM starts Turbo Pascal; in it: new work file, type a program,
+    compile and run it, quit back to the shell, exit."""
+    files = {p.name: p.read_bytes() for p in (CORPUS / "early").iterdir()} if (CORPUS / "early").exists() else {}
+    corpus_file("early", "TURBO.COM")
+    files["COMMAND.COM"] = (doshlab.GUESTS / "COMMAND.COM").read_bytes()
+    # Turbo aborts a compilation on any keypress, so quit only once it has run.
+    script = [(b"", b"turbo\rnewt.pas\rbegin writeln('hi from pascal') end.\x0bdr"), (b"hi from pascal", b"qyexit\r")]
+    result = dosh("COMMAND.COM", files=files, stdin=[script], timeout=60)
+    screen = "\n".join(result.screen())
+    assert "Compiling" in screen and "hi from pascal" in screen, screen
+    assert exited(result) == 0
+    assert "WT.PAS" in result.files(), result.files()  # saved on the way out, through handle writes
