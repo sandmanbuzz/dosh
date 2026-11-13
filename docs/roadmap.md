@@ -47,7 +47,7 @@ that run away. Capsule state is already self-contained (`Vm` plus `Dos`),
 so suspend and resume are bookkeeping, and snapshot is serialising those
 two things.
 
-*Status:* partly done. A per-capsule processor-time watchdog (`limit=` in `BOOT.CFG`) and a console mux (Ctrl-] and a digit) exist. The supervisor still runs the manifest and powers off; there is no management channel, suspend or resume.
+*Status:* done. With `supervisor stay` in `BOOT.CFG` the supervisor waits on COM1 for `list`, `launch`, `suspend`, `resume`, `kill`, `files`, `put`, `get` and `shutdown`. Suspend freezes the guest's clock. Not done: snapshot to disk, and an authenticated channel.
 
 *Done when:* a test launches a capsule, suspends it mid-computation,
 launches and finishes a second one, resumes the first to the right answer,
@@ -103,8 +103,12 @@ surfaces can be attached remotely and capsules launched over the wire.
 This is the "Citrix" part of the idea, and where serial endpoints stop
 being the only transport.
 
+*Status:* half done. A polled virtio-blk driver and a FAT driver (`crates/fat`) give drive C: a persistent disk: a program's output file survives a reboot, and the operator can store programs on the disk and launch them after boot. `tools/doshlab.py serve` puts the management and console lines on TCP, so `socat` attaches to a running capsule from another machine; the TCP is QEMU's. Not done: a network driver and IP stack in the supervisor, a driver for real storage hardware (AHCI, NVMe), modern virtio, subdirectories and long names on the disk.
+
 *Done when:* `socat` on another machine attaches to a running capsule over
-TCP, and a program's output file survives a reboot.
+TCP, and a program's output file survives a reboot. (The second half is
+met. The first is met through the lab's virtual machine; with a supervisor
+network stack it would be met on bare metal.)
 
 ## 6. The rest of the machine room
 

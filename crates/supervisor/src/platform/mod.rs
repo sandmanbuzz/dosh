@@ -2,9 +2,11 @@
 //! pieces of it the supervisor touches directly.
 
 pub mod cpu;
+pub mod pci;
 mod tables;
 pub mod timer;
 pub mod uart;
+pub mod virtio;
 
 pub use tables::nmis;
 

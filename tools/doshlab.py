@@ -47,7 +47,8 @@ ACCELS = {
     # Hardware virtualization, nested: DOSH uses the real SVM of the host CPU.
     "kvm": ["-machine", "q35,accel=kvm", "-cpu", "host"],
 }
-# Serial ports after COM1 (the supervisor log): one console per capsule.
+# Serial ports after COM1 (the supervisor log and management channel): one
+# console per capsule.
 CONSOLE_PORTS = 3
 
 
@@ -172,6 +173,40 @@ def build_disk(image: Path, manifest_text: str, files: dict[str, bytes]) -> None
         mtools("mcopy", str(path), f"::/DOSH/C/{path.name}")
 
 
+def make_disk(image: Path, files: dict[str, bytes] | None = None, megabytes: int = 16) -> Path:
+    """A persistent disk for the supervisor: FAT, labelled DOSHDATA, holding
+    `files`. The same image can be handed to run() any number of times; what
+    programs write to it survives from one boot to the next."""
+    env = {**os.environ, "MTOOLS_SKIP_CHECK": "1"}
+    with open(image, "wb") as f:
+        f.truncate(megabytes << 20)
+    subprocess.run(["mformat", "-i", str(image), "-T", str(megabytes * 2048), "-v", "DOSHDATA", "::"], check=True, env=env)
+    for name, data in (files or {}).items():
+        write_disk_file(image, name, data)
+    return image
+
+
+def write_disk_file(image: Path, name: str, data: bytes) -> None:
+    """Put a file on a disk image while no supervisor has it open."""
+    env = {**os.environ, "MTOOLS_SKIP_CHECK": "1"}
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / name).write_bytes(data)
+        subprocess.run(["mcopy", "-o", "-i", str(image), str(Path(tmp) / name), f"::/{name}"], check=True, env=env)
+
+
+def read_disk_files(image: Path) -> dict[str, bytes]:
+    """What a disk image holds, read with the host's own FAT tools: an
+    independent check on what the supervisor wrote."""
+    env = {**os.environ, "MTOOLS_SKIP_CHECK": "1"}
+    listing = subprocess.run(["mdir", "-b", "-i", str(image), "::"], check=True, env=env, capture_output=True, text=True)
+    files = {}
+    for line in listing.stdout.split():
+        name = line.rsplit("/", 1)[-1]
+        data = subprocess.run(["mtype", "-i", str(image), f"::/{name}"], check=True, env=env, capture_output=True)
+        files[name.upper()] = data.stdout
+    return files
+
+
 def read_text(path: Path) -> str:
     return path.read_text(errors="replace") if path.exists() else ""
 
@@ -199,6 +234,10 @@ def run(
     attach: bool = False,
     nmi: bool = False,
     mux: bool = False,
+    disk: Path | None = None,
+    stay: bool | None = None,
+    mgmt: list[tuple[str, str]] | None = None,
+    stock: list[str] | None = None,
     timeout: float = 120,
     keep: Path | None = None,
 ) -> Result:
@@ -212,9 +251,18 @@ def run(
     `attach` connects capsule 0's console to this process's own terminal
     instead of capturing it (firmware output included, as on a real line).
     `nmi` injects one non-maskable interrupt once the first capsule has
-    started. `keep` preserves the run directory there for inspection.
+    started. `disk` attaches a persistent disk image (see make_disk). `mgmt`
+    is a script for the management channel on COM1, as (wait_for, command)
+    steps: each command goes out once `wait_for` has appeared in the
+    supervisor log since the previous one, and giving one makes the
+    supervisor stay up (`stay`) so the script can end it with `shutdown`.
+    `stock` names programs from build/guests to put on drive C: even though no
+    boot line runs them: the operator will.
+    `keep` preserves the run directory there for inspection.
     """
     files = dict(files or {})
+    for program in stock or []:
+        files.setdefault(program, (GUESTS / program).read_bytes())
     for line in runs:
         program = next(word for word in line.split() if not word.startswith("limit="))
         if (GUESTS / program).exists():
@@ -223,14 +271,16 @@ def run(
     with tempfile.TemporaryDirectory(prefix="dosh-run-") as tmp:
         workdir = Path(tmp)
         if manifest is None:
-            manifest = ("console mux\n" if mux else "") + "".join(f"run {line}\n" for line in runs)
+            stay = mgmt is not None if stay is None else stay
+            manifest = ("console mux\n" if mux else "") + ("supervisor stay\n" if stay else "")
+            manifest += "".join(f"run {line}\n" for line in runs)
         build_disk(workdir / "esp.img", manifest, files)
         shutil.copy(OVMF_VARS, workdir / "vars.fd")
         machine = list(ACCELS[accel])
         if cpu:
             machine[-1] = cpu
         # One socket pair per console port: QEMU gets one end as a chardev.
-        pairs = [socket.socketpair() for _ in range(CONSOLE_PORTS)]
+        pairs = [socket.socketpair() for _ in range(CONSOLE_PORTS + 1)]  # COM1 first
         cmd = [
             "qemu-system-x86_64", *machine,
             "-m", "256", "-rtc", "base=2031-02-03T12:00:00,clock=vm", "-nodefaults", "-display", "none", "-no-reboot",
@@ -238,11 +288,15 @@ def run(
             "-drive", f"if=pflash,format=raw,unit=1,file={workdir / 'vars.fd'}",
             "-drive", f"if=none,id=esp,format=raw,file={workdir / 'esp.img'}",
             "-device", "virtio-blk-pci,drive=esp",
-            "-chardev", f"file,id=log,path={workdir / 'dosh.log'}", "-serial", "chardev:log",
             "-monitor", f"unix:{workdir / 'monitor.sock'},server,nowait",
         ]  # fmt: skip
+        if disk:
+            cmd += [
+                "-drive", f"if=none,id=data,format=raw,file={disk}",
+                "-device", "virtio-blk-pci,drive=data,disable-modern=on,disable-legacy=off",
+            ]  # fmt: skip
         for i, (_, theirs) in enumerate(pairs):
-            backend = "stdio,signal=off" if attach and i == 0 else f"socket,fd={theirs.fileno()}"
+            backend = "stdio,signal=off" if attach and i == 1 else f"socket,fd={theirs.fileno()}"
             cmd += ["-chardev", f"{backend},id=con{i}", "-serial", f"chardev:con{i}"]
 
         started = time.monotonic()
@@ -258,25 +312,30 @@ def run(
             theirs.close()
             ours.append(mine)
 
-        # Collect console output until QEMU closes its ends by exiting. A
+        # Collect output until QEMU closes its ends by exiting. COM1, the
+        # supervisor log, is the first socket; the capsule consoles follow. A
         # capsule's session starts at its endpoint's banner: input is held
         # back until then, and nothing before it (firmware output) counts.
-        consoles = [bytearray() for _ in ours]
-        open_socks = dict(zip(ours, consoles))
+        logbuf = bytearray()
+        consoles = [bytearray() for _ in ours[1:]]
+        buffers = {ours[0]: logbuf, **dict(zip(ours[1:], consoles))}
+        open_socks = dict(buffers)
         # Input is a script of (wait_for, send) steps; plain bytes are one
         # step that goes out as soon as the session starts. A step waits until
         # its marker has appeared in the output since the previous step.
         unsent = {}
-        for sock, data in zip(ours, stdin or []):
+        for sock, data in zip(ours[1:], stdin or []):
             steps = [(b"", data)] if isinstance(data, bytes) else list(data)
             if steps and any(send for _, send in steps):
                 unsent[sock] = steps
+        if mgmt:
+            unsent[ours[0]] = [(w.encode(), c.encode() + b"\n") for w, c in mgmt]
         mark = {sock: 0 for sock in ours}
         timed_out = False
         while open_socks:
             remaining = timeout - (time.monotonic() - started)
             ready, _, _ = select.select(list(open_socks), [], [], min(max(remaining, 0), 0.05))
-            if nmi and "event=start" in read_text(workdir / "dosh.log"):
+            if nmi and b"event=start" in logbuf:
                 inject_nmi(workdir / "monitor.sock")
                 nmi = False
             if not ready:
@@ -287,27 +346,29 @@ def run(
                 continue
             for sock in ready:
                 data = sock.recv(65536)
-                if data:
-                    open_socks[sock] += data
-                    seen = open_socks[sock]
-                    banner = session_banner(ours.index(sock))
-                    while sock in unsent and banner in seen:
-                        wait_for, send = unsent[sock][0]
-                        start = max(mark[sock], seen.index(banner) + len(banner))
-                        if wait_for not in seen[start:]:
-                            break
-                        sock.sendall(send)
-                        mark[sock] = len(seen)
-                        unsent[sock].pop(0)
-                        if not unsent[sock]:
-                            del unsent[sock]
-                else:
+                if not data:
                     del open_socks[sock]
+                    continue
+                buffers[sock] += data
+                seen = buffers[sock]
+                # The log has no session to wait for; a console's starts at its banner.
+                banner = b"" if sock is ours[0] else session_banner(ours.index(sock) - 1)
+                while sock in unsent and banner in seen:
+                    wait_for, send = unsent[sock][0]
+                    start = max(mark[sock], seen.index(banner) + len(banner))
+                    if wait_for not in seen[start:]:
+                        break
+                    sock.sendall(send)
+                    mark[sock] = len(seen)
+                    unsent[sock].pop(0)
+                    if not unsent[sock]:
+                        del unsent[sock]
         qemu_output = (qemu.communicate()[0] or b"").decode(errors="replace")
         for sock in ours:
             sock.close()
 
-        log = read_text(workdir / "dosh.log")
+        log = logbuf.decode(errors="replace")
+        (workdir / "dosh.log").write_text(log)
         if qemu_output.strip():
             log += f"\n--- qemu ---\n{qemu_output}"
         if keep:
@@ -322,7 +383,80 @@ def run(
     return result
 
 
+def serve(
+    disk: Path,
+    *,
+    accel: str = "tcg",
+    bind: str = "127.0.0.1",
+    mgmt_port: int = 7000,
+    console_port: int = 7001,
+    programs: list[Path] | None = None,
+    runs: list[str] | None = None,
+    workdir: Path,
+) -> subprocess.Popen:
+    """Start a DOSH that stays up, with its two lines on TCP.
+
+    `mgmt_port` carries the supervisor log and the management channel;
+    `console_port` carries every capsule's console, switched with Ctrl-] and
+    a digit. `disk` is the persistent disk image (made if it does not exist).
+    `programs` are put on the base drive C:, defaulting to every guest built
+    in build/guests. The caller owns `workdir` and the returned QEMU process.
+    """
+    if not disk.exists():
+        make_disk(disk, megabytes=64)
+    files = {p.name.upper(): p.read_bytes() for p in (programs if programs is not None else sorted(GUESTS.iterdir()))}
+    manifest = "console mux\nsupervisor stay\n" + "".join(f"run {line}\n" for line in runs or [])
+    build_disk(workdir / "esp.img", manifest, files)
+    shutil.copy(OVMF_VARS, workdir / "vars.fd")
+    listen = lambda port: f"socket,host={bind},port={port},server=on,wait=off"  # noqa: E731
+    cmd = [
+        "qemu-system-x86_64", *ACCELS[accel],
+        "-m", "256", "-nodefaults", "-display", "none", "-no-reboot",
+        "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={OVMF_CODE}",
+        "-drive", f"if=pflash,format=raw,unit=1,file={workdir / 'vars.fd'}",
+        "-drive", f"if=none,id=esp,format=raw,file={workdir / 'esp.img'}",
+        "-device", "virtio-blk-pci,drive=esp",
+        "-drive", f"if=none,id=data,format=raw,file={disk}",
+        "-device", "virtio-blk-pci,drive=data,disable-modern=on,disable-legacy=off",
+        "-chardev", listen(mgmt_port) + ",id=mgmt", "-serial", "chardev:mgmt",
+        "-chardev", listen(console_port) + ",id=console", "-serial", "chardev:console",
+    ]  # fmt: skip
+    return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+def serve_main(args: argparse.Namespace) -> int:
+    with tempfile.TemporaryDirectory(prefix="dosh-serve-") as tmp:
+        qemu = serve(
+            args.disk,
+            accel=args.accel,
+            bind=args.bind,
+            mgmt_port=args.mgmt_port,
+            console_port=args.console_port,
+            programs=list(args.programs) if args.programs else None,
+            runs=args.run,
+            workdir=Path(tmp),
+        )
+        print(f"DOSH is up ({args.accel}); persistent disk {args.disk}", flush=True)
+        print(f"  operate:  socat - TCP:{args.bind}:{args.mgmt_port}   (list, launch PROG, suspend N, resume N, kill N, files, shutdown)")
+        print(f"  console:  socat -,raw,echo=0 TCP:{args.bind}:{args.console_port}   (Ctrl-] then a digit switches capsule)", flush=True)
+        try:
+            return qemu.wait()
+        except KeyboardInterrupt:
+            qemu.kill()
+            return 130
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["serve"]:
+        parser = argparse.ArgumentParser(prog="doshlab.py serve", description=serve.__doc__)
+        parser.add_argument("--disk", type=Path, default=ROOT / "build/data.img", help="persistent disk image")
+        parser.add_argument("--accel", choices=ACCELS, default="tcg" if kvm_unavailable() else "kvm")
+        parser.add_argument("--bind", default="127.0.0.1", help="address to listen on; the lines are unauthenticated")
+        parser.add_argument("--mgmt-port", type=int, default=7000)
+        parser.add_argument("--console-port", type=int, default=7001)
+        parser.add_argument("--run", action="append", metavar="CAPSULE", help="a capsule to start at boot")
+        parser.add_argument("programs", nargs="*", type=Path, help="files for drive C: (default: build/guests)")
+        return serve_main(parser.parse_args(sys.argv[2:]))
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("runs", nargs="+", metavar="CAPSULE", help='a program and its arguments, e.g. "ARGS.COM a b"')
     parser.add_argument("--accel", choices=ACCELS, default="tcg" if kvm_unavailable() else "kvm")

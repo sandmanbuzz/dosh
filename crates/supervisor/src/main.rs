@@ -22,9 +22,12 @@ mod boot;
 mod capsule;
 mod device;
 mod hv;
+mod mgmt;
 mod platform;
 mod present;
+mod storage;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use capsule::Capsule;
@@ -77,38 +80,185 @@ fn supervise(provision: boot::Provision) -> ! {
         }
     };
 
-    let mut capsules: Vec<Capsule> = Vec::new();
-    if let Some(hv) = &hv {
-        let (wall_clock, shared_console) = (provision.wall_clock, provision.shared_console);
-        for (id, spec) in provision.capsules.into_iter().enumerate() {
-            let endpoint = present::Endpoint::for_capsule(id, shared_console);
-            capsules.push(Capsule::launch(id, hv, spec, endpoint, wall_clock));
-        }
+    let mut fleet = Fleet {
+        hv,
+        base: provision.files,
+        disk: storage::Disk::find(),
+        wall_clock: provision.wall_clock,
+        shared: provision.shared_console,
+        capsules: Vec::new(),
+    };
+    for spec in provision.capsules {
+        fleet.launch(spec);
+    }
+
+    // Drain the line before announcing: the operator may answer at once.
+    let mut channel = provision.stay.then(mgmt::Channel::open);
+    if channel.is_some() {
+        log!("mgmt event=ready");
     }
 
     // Round-robin, preemptive: each live capsule in turn gets the processor
     // until it finishes, blocks, or the clock ticks.
     loop {
-        let mut live = false;
-        let mut ran = false;
-        for capsule in &mut capsules {
-            ran |= capsule.run_slice();
-            live |= capsule.is_live();
-        }
-        if !live {
+        let ran = fleet.run_round();
+        if let Some(channel) = channel.as_mut() {
+            while let Some(input) = channel.poll() {
+                match input {
+                    mgmt::Input::Command(mgmt::Command::Shutdown) => {
+                        log!("mgmt cmd=shutdown status=ok");
+                        fleet.shutdown()
+                    }
+                    mgmt::Input::Command(command) => fleet.command(command),
+                    mgmt::Input::Invalid(why) => log!("mgmt status=error reason=\"{why}\""),
+                }
+            }
+        } else if !fleet.any_live() {
             break;
         }
         if !ran {
             platform::timer::idle(); // every live capsule is waiting for input
         }
     }
+    fleet.shutdown()
+}
 
-    let exited = capsules.iter().filter(|c| c.exit_code().is_some()).count();
-    if platform::nmis() > 0 {
-        log!("nmi taken={}", platform::nmis());
+/// Everything the supervisor runs: the capsules, and what they are stocked from.
+struct Fleet {
+    hv: Option<hv::Hv>,
+    base: Vec<(String, Vec<u8>)>,
+    disk: Option<storage::Disk>,
+    wall_clock: Option<dosh_dos::DateTime>,
+    shared: bool,
+    capsules: Vec<Capsule>,
+}
+
+/// Machines kept at once: each holds a megabyte of guest memory and a drive
+/// out of the supervisor's fixed pool.
+const MAX_LIVE: usize = 24;
+
+impl Fleet {
+    /// The files a capsule launched now finds on C:: the base drive, with the
+    /// persistent disk laid over it.
+    fn stock(&mut self) -> Vec<(String, Vec<u8>)> {
+        let mut files = self.base.clone();
+        if let Some(disk) = self.disk.as_mut() {
+            files.extend(disk.files());
+        }
+        files
     }
-    log!("shutdown capsules={} exited={} faulted={}", capsules.len(), exited, capsules.len() - exited);
-    platform::power_off()
+
+    fn launch(&mut self, spec: boot::CapsuleSpec) -> Option<usize> {
+        let id = self.capsules.len();
+        let files = self.stock();
+        let hv = self.hv.as_ref()?;
+        let endpoint = present::Endpoint::for_capsule(id, self.shared);
+        self.capsules.push(Capsule::launch(id, hv, spec, files, endpoint, self.wall_clock));
+        Some(id)
+    }
+
+    fn any_live(&self) -> bool {
+        self.capsules.iter().any(Capsule::is_live)
+    }
+
+    /// One turn for every capsule, settling those that finished. Returns
+    /// whether any of them did anything.
+    fn run_round(&mut self) -> bool {
+        let mut ran = false;
+        for capsule in &mut self.capsules {
+            ran |= capsule.run_slice();
+            if !capsule.is_live() && !capsule.is_retired() {
+                if capsule.exit_code().is_some() {
+                    let changes = capsule.changes();
+                    if let Some(disk) = self.disk.as_mut() {
+                        disk.store(capsule.id(), &changes);
+                    }
+                }
+                capsule.retire();
+            }
+        }
+        ran
+    }
+
+    fn command(&mut self, command: mgmt::Command) {
+        use mgmt::Command::*;
+        match command {
+            List => {
+                for c in &self.capsules {
+                    log!("mgmt item=capsule id={} program={} status={}", c.id(), c.program(), c.status());
+                }
+                log!("mgmt cmd=list status=ok count={}", self.capsules.len());
+            }
+            Launch { limit, program, tail } => {
+                let known = |files: &[(String, Vec<u8>)]| files.iter().any(|(n, _)| n.eq_ignore_ascii_case(&program));
+                let live = self.capsules.iter().filter(|c| !c.is_retired()).count();
+                if self.hv.is_none() {
+                    log!("mgmt cmd=launch status=error reason=\"no hardware virtualization\"");
+                } else if live >= MAX_LIVE {
+                    log!("mgmt cmd=launch status=error reason=\"too many capsules ({MAX_LIVE})\"");
+                } else if !known(&self.stock()) {
+                    log!("mgmt cmd=launch status=error reason=\"no such program: {program}\"");
+                } else if let Some(id) = self.launch(boot::CapsuleSpec { cpu_limit: limit, program, tail }) {
+                    log!("mgmt cmd=launch status=ok id={id}");
+                }
+            }
+            Suspend(id) => self.act("suspend", id, Capsule::suspend, "not running"),
+            Resume(id) => self.act("resume", id, Capsule::resume, "not suspended"),
+            Kill(id) => self.act("kill", id, Capsule::kill, "not running"),
+            Files => {
+                let Some(disk) = self.disk.as_mut() else {
+                    return log!("mgmt cmd=files status=error reason=\"no persistent disk\"");
+                };
+                let files = disk.files();
+                for (name, data) in &files {
+                    log!("mgmt item=file name={name} size={}", data.len());
+                }
+                log!("mgmt cmd=files status=ok count={}", files.len());
+            }
+            Put { name, data } => {
+                let Some(disk) = self.disk.as_mut() else {
+                    return log!("mgmt cmd=put status=error reason=\"no persistent disk\"");
+                };
+                match disk.put(&name, &data) {
+                    Ok(()) => log!("mgmt cmd=put status=ok name={name} size={}", data.len()),
+                    Err(why) => log!("mgmt cmd=put status=error reason=\"{why}\""),
+                }
+            }
+            Get(name) => {
+                let Some(disk) = self.disk.as_mut() else {
+                    return log!("mgmt cmd=get status=error reason=\"no persistent disk\"");
+                };
+                match disk.get(&name) {
+                    Ok(Some(data)) => {
+                        log!("mgmt cmd=get status=ok name={name} size={} hex={}", data.len(), mgmt::to_hex(&data))
+                    }
+                    Ok(None) => log!("mgmt cmd=get status=error reason=\"no such file\""),
+                    Err(why) => log!("mgmt cmd=get status=error reason=\"{why}\""),
+                }
+            }
+            Shutdown => unreachable!("handled by the loop"),
+        }
+    }
+
+    fn act(&mut self, cmd: &str, id: usize, what: fn(&mut Capsule) -> bool, refusal: &str) {
+        let Some(capsule) = self.capsules.get_mut(id) else {
+            return log!("mgmt cmd={cmd} status=error reason=\"no capsule {id}\"");
+        };
+        if what(capsule) {
+            log!("mgmt cmd={cmd} status=ok id={id}");
+        } else {
+            log!("mgmt cmd={cmd} status=error reason=\"capsule {id} is {refusal}\"");
+        }
+    }
+
+    fn shutdown(&self) -> ! {
+        let exited = self.capsules.iter().filter(|c| c.exit_code().is_some()).count();
+        if platform::nmis() > 0 {
+            log!("nmi taken={}", platform::nmis());
+        }
+        log!("shutdown capsules={} exited={} faulted={}", self.capsules.len(), exited, self.capsules.len() - exited);
+        platform::power_off()
+    }
 }
 
 #[panic_handler]

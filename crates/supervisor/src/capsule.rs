@@ -35,12 +35,32 @@ enum State {
     Halted,
     Exited(u8),
     Faulted,
+    /// Stopped by the operator.
+    Killed,
+}
+
+impl State {
+    fn is_live(self) -> bool {
+        matches!(self, State::Running | State::WaitingInput | State::Halted)
+    }
+}
+
+/// What a capsule needs only while it can still run. Dropped on retirement,
+/// which hands the guest's memory and its drive back to the supervisor.
+struct Machine {
+    vm: hv::Vm,
+    dos: Dos,
 }
 
 pub struct Capsule {
     id: usize,
-    vm: hv::Vm,
-    dos: Dos,
+    program: String,
+    /// `None` once the capsule has finished and been shown for the last time.
+    machine: Option<Machine>,
+    /// Set while the operator has the capsule suspended: the tick count then.
+    suspended_at: Option<u64>,
+    /// Ticks the capsule has spent suspended. Its clock does not count them.
+    paused: u64,
     console: Console,
     cga: Cga,
     endpoint: Endpoint,
@@ -107,14 +127,21 @@ fn apply(cpu: &mut Cpu, regs: &Regs) {
 }
 
 impl Capsule {
-    /// Build a capsule and load its program. A capsule whose program cannot
-    /// be loaded is created already faulted, so it is accounted for like any
+    /// Build a capsule with `files` on its drive C: and load its program. A
+    /// capsule whose program cannot be loaded is created already faulted, so it is accounted for like any
     /// other.
-    pub fn launch(id: usize, hv: &hv::Hv, spec: CapsuleSpec, endpoint: Endpoint, wall_clock: Option<DateTime>) -> Self {
+    pub fn launch(
+        id: usize,
+        hv: &hv::Hv,
+        spec: CapsuleSpec,
+        files: Vec<(String, Vec<u8>)>,
+        endpoint: Endpoint,
+        wall_clock: Option<DateTime>,
+    ) -> Self {
         let mut vm = hv.create_vm(RAM_SIZE);
-        let stocked: usize = spec.files.iter().map(|(_, data)| data.len()).sum();
+        let stocked: usize = files.iter().map(|(_, data)| data.len()).sum();
         let mut volume = Volume::new(stocked + DISK_ROOM);
-        for (name, data) in spec.files {
+        for (name, data) in files {
             volume.put(&name, data);
         }
         let stocked = volume.names().map(|n| (n.to_string(), fnv1a(volume.get(n).unwrap_or_default()))).collect();
@@ -128,8 +155,10 @@ impl Capsule {
         log!("capsule id={id} event=create program={} console={}", spec.program, endpoint.name());
         let mut capsule = Self {
             id,
-            vm,
-            dos,
+            program: spec.program.clone(),
+            machine: Some(Machine { vm, dos }),
+            suspended_at: None,
+            paused: 0,
             console: Console::default(),
             cga: Cga::default(),
             endpoint,
@@ -144,7 +173,7 @@ impl Capsule {
         };
         match loaded {
             Ok(regs) => {
-                let cpu = &mut capsule.vm.cpu;
+                let cpu = &mut capsule.machine.as_mut().expect("just built").vm.cpu;
                 cpu.fs = Segment::real(0, false);
                 cpu.gs = Segment::real(0, false);
                 apply(cpu, &regs);
@@ -155,8 +184,21 @@ impl Capsule {
         capsule
     }
 
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// Whether the capsule has a program that could still run, suspended or not.
     pub fn is_live(&self) -> bool {
-        matches!(self.state, State::Running | State::WaitingInput | State::Halted)
+        self.state.is_live()
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.suspended_at.is_some()
     }
 
     pub fn exit_code(&self) -> Option<u8> {
@@ -166,9 +208,72 @@ impl Capsule {
         }
     }
 
+    /// One word for what the capsule is doing, for the operator.
+    pub fn status(&self) -> &'static str {
+        match self.state {
+            _ if self.is_suspended() && self.is_live() => "suspended",
+            State::Running => "running",
+            State::WaitingInput => "waiting",
+            State::Halted => "idle",
+            State::Exited(_) => "exited",
+            State::Faulted => "faulted",
+            State::Killed => "killed",
+        }
+    }
+
+    /// Stop scheduling the capsule and freeze its clock. Returns whether it
+    /// was running to be suspended.
+    pub fn suspend(&mut self) -> bool {
+        if !self.is_live() || self.is_suspended() {
+            return false;
+        }
+        self.suspended_at = Some(timer::ticks());
+        log!("capsule id={} event=suspend", self.id);
+        true
+    }
+
+    /// Undo [`suspend`](Self::suspend). The guest's clock carries on from
+    /// where it stopped, as if the machine had been paused.
+    pub fn resume(&mut self) -> bool {
+        let Some(since) = self.suspended_at.take() else { return false };
+        self.paused += timer::ticks() - since;
+        log!("capsule id={} event=resume", self.id);
+        true
+    }
+
+    /// Stop the capsule for good, whatever it is doing.
+    pub fn kill(&mut self) -> bool {
+        if !self.is_live() {
+            return false;
+        }
+        self.state = State::Killed;
+        self.suspended_at = None;
+        log!("capsule id={} event=kill", self.id);
+        self.retire();
+        true
+    }
+
+    /// The capsule has finished and shown its last. Give back its guest memory
+    /// and drive. The endpoint stays: on a shared line it still owns the
+    /// Ctrl-] handling while it is the capsule shown.
+    pub fn retire(&mut self) {
+        self.present();
+        self.machine = None;
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.machine.is_none()
+    }
+
     /// Give the capsule a turn: it runs until it finishes, blocks, or the
     /// clock ticks. Returns whether it did anything.
     pub fn run_slice(&mut self) -> bool {
+        if self.is_suspended() || self.machine.is_none() {
+            // Not running, but on a shared line it may be the capsule shown,
+            // and then it still has to hear the key that moves the line.
+            self.endpoint.pump(&mut self.console);
+            return false;
+        }
         timer::accept(); // a tick already pending belongs to nobody's slice
         let started = timer::ticks();
         let mut ran = false;
@@ -182,21 +287,22 @@ impl Capsule {
 
     fn step(&mut self) -> bool {
         self.endpoint.pump(&mut self.console);
+        let Some(Machine { vm, dos }) = self.machine.as_mut() else { return false };
         // The clock advances whether or not the guest runs, so a capsule that
         // is waiting for input still sees midnight.
         // The guest's clock is its own BIOS count, which follows elapsed time,
         // not the supervisor's quantum: one INT 08h per count advance.
-        if self.dos.set_clock(&mut Mem::new(self.vm.ram()), timer::ticks()) {
-            self.vm.post_interrupt(TICK_VECTOR);
+        if dos.set_clock(&mut Mem::new(vm.ram()), timer::ticks() - self.paused) {
+            vm.post_interrupt(TICK_VECTOR);
             if self.state == State::Halted {
                 // The interrupt is taken after the HLT that put us to sleep.
-                self.vm.cpu.rip = (self.vm.cpu.rip as u16).wrapping_add(1) as u64;
+                vm.cpu.rip = (vm.cpu.rip as u16).wrapping_add(1) as u64;
                 self.state = State::Running;
             }
         }
         let ran = match self.state {
             State::Running => {
-                let exit = self.vm.run();
+                let exit = vm.run();
                 self.exits += 1;
                 self.handle(exit);
                 true
@@ -215,24 +321,27 @@ impl Capsule {
     /// over the display is drawn, at the clock's pace and when it ends; its
     /// console output lands on that screen rather than in the byte stream.
     fn present(&mut self) {
-        if self.dos.screen_active() {
-            if !self.screen_shown {
-                self.endpoint.pump(&mut self.console); // the stream so far
-                self.screen_shown = true;
-            }
-            let live = self.is_live();
-            let mut mem = Mem::new(self.vm.ram());
-            self.dos.draw_console(&mut mem, self.console.tx.drain(..));
-            let ticks = timer::ticks();
-            if ticks != self.drawn_at || !live {
-                self.drawn_at = ticks;
-                self.endpoint.show(&video::snapshot(&mem));
+        if let Some(Machine { vm, dos }) = self.machine.as_mut() {
+            if dos.screen_active() {
+                if !self.screen_shown {
+                    self.endpoint.pump(&mut self.console); // the stream so far
+                    self.screen_shown = true;
+                }
+                let live = self.state.is_live();
+                let mut mem = Mem::new(vm.ram());
+                dos.draw_console(&mut mem, self.console.tx.drain(..));
+                let ticks = timer::ticks();
+                if ticks != self.drawn_at || !live {
+                    self.drawn_at = ticks;
+                    self.endpoint.show(&video::snapshot(&mem));
+                }
             }
         }
         self.endpoint.pump(&mut self.console);
     }
 
     fn handle(&mut self, exit: Exit) {
+        let Some(Machine { vm, .. }) = self.machine.as_mut() else { return };
         match exit {
             Exit::Halt => self.service(),
             Exit::Io { string: true, port, .. } => self.fault_here(format!("string I/O on port {port:#x}")),
@@ -240,15 +349,15 @@ impl Capsule {
                 // No devices are attached to the capsule's I/O bus yet. As on
                 // a PC, writes to an empty address vanish and reads float high.
                 if input && port == Cga::STATUS_PORT && bytes == 1 {
-                    let rax = &mut self.vm.cpu.gprs.rax;
+                    let rax = &mut vm.cpu.gprs.rax;
                     *rax = *rax & !0xFF | self.cga.status() as u64;
                 } else {
                     if input {
-                        self.vm.cpu.gprs.rax |= (1u64 << (8 * bytes.min(4))) - 1;
+                        vm.cpu.gprs.rax |= (1u64 << (8 * bytes.min(4))) - 1;
                     }
                     self.stray_io += 1;
                 }
-                self.vm.cpu.rip = next_rip;
+                vm.cpu.rip = next_rip;
             }
             Exit::MemoryFault { address } => self.fault_here(format!("access to unmapped memory at {address:#x}")),
             Exit::Shutdown => self.fault_here("triple fault".into()),
@@ -269,41 +378,52 @@ impl Capsule {
         }
     }
 
-    /// Log each file the program created or changed, with a hash of its
-    /// contents: the volume is not written back, so this is how a program's
-    /// output is observed.
-    fn report_changed_files(&self) {
-        let volume = self.dos.volume();
+    /// What the program did to its drive C: since launch: every file it
+    /// created or changed, and the names of those it deleted. Logs each
+    /// change with a hash of the contents, which is how a program's output is
+    /// observed, then hands the changes to whoever persists them.
+    pub fn changes(&self) -> Changes {
+        let mut changes = Changes::default();
+        let Some(Machine { dos, .. }) = self.machine.as_ref() else { return changes };
+        let volume = dos.volume();
         for name in volume.names() {
             let data = volume.get(name).unwrap_or_default();
             let hash = fnv1a(data);
             if !self.stocked.iter().any(|(n, h)| n == name && *h == hash) {
                 log!("file capsule={} name={name} size={} fnv1a={hash:08x}", self.id, data.len());
+                changes.written.push((name.to_string(), data.to_vec()));
             }
         }
+        for (name, _) in &self.stocked {
+            if volume.get(name).is_none() {
+                log!("file capsule={} name={name} deleted=yes", self.id);
+                changes.deleted.push(name.clone());
+            }
+        }
+        changes
     }
 
     /// The guest is halted at `cs:ip`. If that is a service gate, perform
     /// the service.
     fn service(&mut self) {
-        let mut regs = regs_of(&self.vm.cpu);
+        let Some(Machine { vm, dos }) = self.machine.as_mut() else { return };
+        let mut regs = regs_of(&vm.cpu);
         let Some(vector) = firmware::gate_vector(regs.cs, regs.ip) else {
             return self.guest_halt();
         };
-        let mut mem = Mem::new(self.vm.ram());
+        let mut mem = Mem::new(vm.ram());
         // The gate was entered by an interrupt, whose frame holds the address
         // to return to: just past an INT instruction, or at a faulting one.
         let origin = (mem.r16(regs.ss, regs.sp.wrapping_add(2)), mem.r16(regs.ss, regs.sp));
-        match self.dos.interrupt(vector, &mut regs, &mut mem, &mut self.console) {
+        match dos.interrupt(vector, &mut regs, &mut mem, &mut self.console) {
             Outcome::Resume => {
                 regs.ip += 1; // on to the gate's IRET
-                apply(&mut self.vm.cpu, &regs);
+                apply(&mut vm.cpu, &regs);
                 self.state = State::Running;
             }
             Outcome::WaitInput => self.state = State::WaitingInput,
             Outcome::Exit(code) => {
                 self.state = State::Exited(code);
-                self.report_changed_files();
                 log!(
                     "capsule id={} event=exit code={code} vmexits={} preempted={} stray_io={}",
                     self.id,
@@ -327,13 +447,14 @@ impl Capsule {
     /// The guest executed HLT outside a service gate. With interrupts enabled
     /// the next tick wakes it; with them disabled nothing ever would.
     fn guest_halt(&mut self) {
-        if self.vm.cpu.rflags & FLAG_IF == 0 {
+        let Some(Machine { vm, .. }) = self.machine.as_mut() else { return };
+        if vm.cpu.rflags & FLAG_IF == 0 {
             return self.fault_here("HLT with interrupts disabled".into());
         }
-        if self.vm.interrupt_pending() {
+        if vm.interrupt_pending() {
             // An interrupt is already posted, and interrupts are held off
             // only for the instruction after STI: take it after this HLT.
-            self.vm.cpu.rip = (self.vm.cpu.rip as u16).wrapping_add(1) as u64;
+            vm.cpu.rip = (vm.cpu.rip as u16).wrapping_add(1) as u64;
             return;
         }
         self.state = State::Halted;
@@ -341,8 +462,9 @@ impl Capsule {
 
     /// Stop the capsule for good, blaming the instruction the guest is at.
     fn fault_here(&mut self, reason: String) {
-        let cpu = &self.vm.cpu;
-        self.fault((cpu.cs.selector, cpu.rip as u16), reason);
+        let Some(Machine { vm, .. }) = self.machine.as_ref() else { return };
+        let at = (vm.cpu.cs.selector, vm.cpu.rip as u16);
+        self.fault(at, reason);
     }
 
     fn fault(&mut self, at: (u16, u16), reason: String) {
@@ -355,6 +477,13 @@ impl Capsule {
             self.exits
         );
     }
+}
+
+/// What a finished capsule's program left different on its drive C:.
+#[derive(Default)]
+pub struct Changes {
+    pub written: Vec<(String, Vec<u8>)>,
+    pub deleted: Vec<String>,
 }
 
 /// 32-bit FNV-1a: a cheap content fingerprint for the log.

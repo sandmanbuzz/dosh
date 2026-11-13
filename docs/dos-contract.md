@@ -142,7 +142,11 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
   handles 0–2 are the console; 3 and 4 (`AUX`, `PRN`) are null devices.
 - Twenty handles per process.
 - 4 MiB of space beyond the provisioned files.
-- Changes are not written back to the boot volume.
+- Changes persist only if a disk labelled `DOSHDATA` is attached: when the
+  program exits, files it created or changed are written to the disk and
+  files it deleted are removed from it. A program that faults, or is
+  killed, leaves the disk as it found it. Names that do not fit 8.3 cannot
+  be stored and are reported in the log. The boot volume is never written.
 
 ## The console
 

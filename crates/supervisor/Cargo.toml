@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 dosh-dos = { path = "../dos" }
+dosh-fat = { path = "../fat" }
 dosh-term = { path = "../term" }
 linked_list_allocator = "0.10"
 uefi = { version = "0.41", features = ["alloc"] }

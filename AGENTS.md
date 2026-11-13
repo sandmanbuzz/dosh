@@ -103,6 +103,8 @@ debugging the bad path. Only reset commits you made.
 | Boot, manifest, drive C: provisioning | `crates/supervisor/src/boot.rs` |
 | Paging, descriptor tables, traps, UART, clock | `crates/supervisor/src/platform/` |
 | Console transports, screen delivery | `crates/supervisor/src/present.rs` |
+| Operator commands, staying up | `crates/supervisor/src/mgmt.rs`, `Fleet` in `main.rs` |
+| Persistent disk (virtio-blk, FAT) | `crates/supervisor/src/storage.rs`, `platform/virtio.rs`, `crates/fat` |
 | Virtual devices (console, display status port) | `crates/supervisor/src/device.rs` |
 | Guest programs | `guests/*.asm`, `guests/wc.c`, `guests/Makefile` |
 | Acceptance tests | `tests/test_acceptance.py`, fixtures in `tests/conftest.py` |
@@ -118,7 +120,8 @@ debugging the bad path. Only reset commits you made.
 ./lab                                  # shell in the lab
 ./lab make efi                         # build the supervisor
 ./lab make guests                      # build the guest corpus
-./lab make check                       # fmt, clippy, unit tests (dos and term crates)
+./lab make check                       # fmt, clippy, unit tests (dos, term, fat crates)
+./lab --net tools/doshlab.py serve     # a supervisor that stays up, on TCP ports (see docs/lab.md)
 ./lab make test                        # everything
 ./lab python3 -m pytest tests -k NAME  # one acceptance test
 ./lab tools/doshlab.py --raw --keep build/run PROGRAM.COM   # diagnose a run

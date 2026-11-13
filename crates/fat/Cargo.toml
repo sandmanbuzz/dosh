@@ -1,0 +1,7 @@
+[package]
+name = "dosh-fat"
+description = "A small FAT16/FAT32 driver for a flat root directory, over any block device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true

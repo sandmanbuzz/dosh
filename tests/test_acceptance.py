@@ -518,3 +518,229 @@ def test_a_program_built_by_a_compiler_in_the_capsule_runs_in_the_capsule(dosh):
     assert "built here, run here" in "\n".join(result.screen())
     assert exited(result) == 0
     assert {"WT.COM", "WT.PAS"} <= set(result.files()), result.files()
+
+
+# --- a supervisor that stays up -------------------------------------------
+
+
+def order(result, *needles):
+    """Positions of each needle in the supervisor log; asserts they all exist."""
+    spots = [result.log.find(n) for n in needles]
+    assert all(s >= 0 for s in spots), f"missing one of {needles}\n{result.log}"
+    return spots
+
+
+def test_operator_can_suspend_resume_and_kill_capsules(dosh):
+    """Launch a long computation, suspend it, run another capsule to the end
+    while it sleeps, resume it to the right answer, and kill a capsule that
+    never ends."""
+    n, rounds = 400_000_000, 6
+    expected = b"%08X" % ((rounds * (n * (n + 1) // 2)) & 0xFFFFFFFF)
+    result = dosh(
+        mgmt=[
+            ("mgmt event=ready", "launch LONG.COM"),
+            ("cmd=launch status=ok id=0", "suspend 0"),
+            ("cmd=suspend status=ok", "launch HELLO.COM"),
+            ("cmd=launch status=ok id=1", "launch LOOP.COM"),
+            ("capsule id=1 event=exit", "list"),
+            ("cmd=list status=ok", "kill 2"),
+            ("cmd=kill status=ok", "resume 0"),
+            ("capsule id=0 event=exit", "list"),
+            ("cmd=list status=ok count=3", "shutdown"),
+        ],
+        stock=["LONG.COM", "HELLO.COM", "LOOP.COM"],
+        timeout=120,
+    )
+    assert exited(result, 0) == 0
+    assert result.consoles[0] == expected
+    assert result.consoles[1] == b"Hello from DOS!\r\n" and exited(result, 1) == 0
+    # The sequence the operator drove, in order: LONG slept while HELLO ran.
+    suspend, hello_done, resume, long_done = order(
+        result, "capsule id=0 event=suspend", "capsule id=1 event=exit", "capsule id=0 event=resume", "capsule id=0 event=exit"
+    )
+    assert suspend < hello_done < resume < long_done
+    assert result.one("capsule", id="2", event="kill")
+    assert "mgmt item=capsule id=2 program=LOOP.COM status=killed" in result.log
+    assert "mgmt item=capsule id=0 program=LONG.COM status=suspended" not in result.log.split("event=resume")[1]
+
+
+def test_operator_errors_are_answered_and_change_nothing(dosh):
+    result = dosh(
+        mgmt=[
+            ("mgmt event=ready", "frobnicate"),
+            ("unknown command: frobnicate", "suspend 7"),
+            ("no capsule 7", "launch NOPE.COM"),
+            ("no such program: NOPE.COM", "launch"),
+            ("launch needs a program", "launch HELLO.COM"),
+            ("cmd=launch status=ok id=0", "resume 0"),
+            ("capsule id=0 event=exit", "kill 0"),
+            ("cmd=kill status=error", "shutdown"),
+        ],
+        stock=["HELLO.COM"],
+    )
+    assert "capsule 0 is not suspended" in result.log
+    assert "capsule 0 is not running" in result.log
+    assert exited(result, 0) == 0
+
+
+# --- a drive that persists ------------------------------------------------
+
+
+def test_a_programs_output_file_survives_a_reboot(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    for boot in (1, 2, 3):
+        result = dosh("COUNTER.COM", disk=disk)
+        assert result.consoles[0] == b"%03d" % boot
+        assert exited(result) == boot
+        result.one("storage", event="attach", label="DOSHDATA")
+        result.one("storage", event="write", capsule="0", name="COUNT.DAT", size="1")
+    # What the host's own FAT tools read back is what the supervisor wrote.
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x03"}
+
+
+def test_a_disk_prepared_on_the_host_is_read_and_extended(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img", {"COUNT.DAT": b"\x29", "NOTES.TXT": b"left alone"})
+    result = dosh("COUNTER.COM", disk=disk)
+    assert result.consoles[0] == b"042"
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x2a", "NOTES.TXT": b"left alone"}
+
+
+def test_a_program_that_faults_leaves_the_disk_alone(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img", {"COUNT.DAT": b"\x07"})
+    result = dosh("limit=1 LOOP.COM", disk=disk)
+    assert "watchdog" in faulted(result)
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x07"}
+    assert not result.find("storage", event="write")
+
+
+def test_work_can_be_loaded_after_boot_and_its_output_kept(dosh, tmp_path):
+    """The operator stores a program on the disk over the management channel,
+    launches it though no boot line named it, and reads a file it made back."""
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    counter = (doshlab.GUESTS / "COUNTER.COM").read_bytes()
+    result = dosh(
+        disk=disk,
+        mgmt=[
+            ("mgmt event=ready", "files"),
+            ("cmd=files status=ok count=0", f"put COUNTER.COM {counter.hex()}"),
+            ("cmd=put status=ok", "launch COUNTER.COM"),
+            ("capsule id=0 event=exit code=1", "launch COUNTER.COM"),
+            ("capsule id=1 event=exit code=2", "files"),
+            ("cmd=files status=ok count=2", "get COUNT.DAT"),
+            ("cmd=get status=ok", "shutdown"),
+        ],
+    )
+    assert result.consoles[0] == b"001" and result.consoles[1] == b"002"
+    assert "mgmt item=file name=COUNTER.COM size=%d" % len(counter) in result.log
+    assert "name=COUNT.DAT size=1 hex=02" in result.log
+    assert doshlab.read_disk_files(disk) == {"COUNTER.COM": counter, "COUNT.DAT": b"\x02"}
+
+
+def test_without_a_disk_nothing_persists_and_the_operator_is_told(dosh):
+    result = dosh(
+        "COUNTER.COM",
+        mgmt=[("capsule id=0 event=exit", "files"), ("cmd=files status=error", "put A.TXT 41"), ("cmd=put status=error", "shutdown")],
+    )
+    assert result.consoles[0] == b"001"
+    assert not result.find("storage", event="attach")
+    assert "no persistent disk" in result.log
+
+
+def test_a_disk_that_is_not_ours_is_left_alone(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img", {"COUNT.DAT": b"\x05"})
+    subprocess = __import__("subprocess")
+    subprocess.run(["mlabel", "-i", str(disk), "::SOMEONELSE"], check=True, env={"MTOOLS_SKIP_CHECK": "1", "PATH": "/usr/bin:/bin"})
+    result = dosh("COUNTER.COM", disk=disk)
+    assert result.consoles[0] == b"001"
+    assert not result.find("storage", event="attach")
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x05"}
+
+
+# --- a persistent environment, reachable over TCP -------------------------
+
+
+def test_a_served_supervisor_is_operated_and_attached_over_tcp(accel, tmp_path):
+    """The whole point: start DOSH once, reach it from outside the way
+    `socat` would, run work, shut it down, start it again, and find the
+    work's output still there."""
+    import socket as sockets
+    import time
+
+    disk = doshlab.make_disk(tmp_path / "data.img", megabytes=32)
+
+    def free_port():
+        with sockets.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def connect(port, deadline):
+        while time.monotonic() < deadline:
+            try:
+                return sockets.create_connection(("127.0.0.1", port), timeout=1)
+            except OSError:
+                time.sleep(0.1)
+        raise AssertionError(f"nothing listening on {port}")
+
+    seen = {}
+
+    def read_until(sock, marker, deadline):
+        """Read until `marker` has arrived on this line; what came before
+        and including it is consumed, the rest stays for the next call."""
+        buffer = seen.setdefault(sock, bytearray())
+        sock.settimeout(1)
+        while marker not in buffer:
+            assert time.monotonic() < deadline, f"never saw {marker!r} in {bytes(buffer[-400:])!r}"
+            try:
+                chunk = sock.recv(65536)
+            except TimeoutError:
+                continue
+            assert chunk, f"line closed before {marker!r}: {bytes(buffer[-400:])!r}"
+            buffer += chunk
+        end = buffer.index(marker) + len(marker)
+        consumed = bytes(buffer[:end])
+        del buffer[:end]
+        return consumed
+
+    def session(boot):
+        mgmt_port, console_port = free_port(), free_port()
+        work = tmp_path / f"serve{boot}"
+        work.mkdir()
+        qemu = doshlab.serve(
+            disk, accel=accel, mgmt_port=mgmt_port, console_port=console_port,
+            programs=[doshlab.GUESTS / "COUNTER.COM", doshlab.GUESTS / "HELLO.COM"], workdir=work,
+        )  # fmt: skip
+        deadline = time.monotonic() + (120 if accel == "tcg" else 60)
+        try:
+            mgmt, console = connect(mgmt_port, deadline), connect(console_port, deadline)
+            read_until(mgmt, b"mgmt event=ready", deadline)
+            mgmt.sendall(b"launch COUNTER.COM\n")
+            read_until(mgmt, b"cmd=launch status=ok id=0", deadline)
+            # Firmware chatters on every serial line before DOSH owns it; the
+            # capsule's session begins at its banner.
+            read_until(console, b"--- DOSH capsule 0 ---\r\n", deadline)
+            read_until(console, b"00%d" % boot, deadline)
+            read_until(mgmt, b"capsule id=0 event=exit code=%d" % boot, deadline)
+            mgmt.sendall(b"shutdown\n")
+            read_until(mgmt, b"shutdown capsules=1", deadline)
+            assert qemu.wait(timeout=30) == 0
+        finally:
+            qemu.kill()
+            qemu.communicate()
+
+    session(1)
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x01"}
+    session(2)
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x02"}
+
+
+def test_a_supervisor_that_stays_up_gives_finished_capsules_back(dosh):
+    """Eighty one-megabyte capsules do not fit in the supervisor's memory at
+    once, so this only works if a finished capsule releases its machine."""
+    count = 80
+    steps = [("mgmt event=ready", "launch HELLO.COM")]
+    for i in range(count - 1):
+        steps.append((f"capsule id={i} event=exit", "launch HELLO.COM"))
+    steps += [(f"capsule id={count - 1} event=exit", "list"), ("cmd=list status=ok", "shutdown")]
+    result = dosh(mgmt=steps, stock=["HELLO.COM"], timeout=170)
+    assert result.one("shutdown")["exited"] == str(count)
+    assert "status=error" not in result.log

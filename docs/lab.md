@@ -35,6 +35,13 @@ so a rebuilt image may pick up point updates to QEMU or OVMF.
 | `python3 -m pytest tests -k NAME` | Selected acceptance tests |
 | `tools/doshlab.py CAPSULE...` | Boot DOSH with these capsules and show consoles and log |
 
+`tools/doshlab.py serve` boots a supervisor that stays up (`./lab --net
+tools/doshlab.py serve`, so the lines are reachable from the host). It
+prints the two `socat` commands that operate it and attach to its console.
+`--disk` names the persistent disk image (default `build/data.img`, made on
+first use); it is an ordinary FAT image, so `mdir -i build/data.img ::`
+shows what programs left.
+
 `tools/doshlab.py` options: `--accel kvm|tcg` picks the execution path;
 `--attach` makes your terminal the first capsule's console; `--keep DIR`
 saves the boot disk and logs of a run; `--raw` prints firmware output too;

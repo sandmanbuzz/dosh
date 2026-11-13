@@ -31,13 +31,17 @@ pub struct CapsuleSpec {
     pub program: String,
     /// The command tail exactly as DOS would pass it, leading space included.
     pub tail: Vec<u8>,
-    /// The contents of this capsule's own drive C:.
-    pub files: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Default)]
 pub struct Provision {
     pub capsules: Vec<CapsuleSpec>,
+    /// The files every capsule finds on its drive C: before the persistent
+    /// disk lays its own over them.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// Whether to wait for the operator's commands once the manifest is done,
+    /// instead of powering off.
+    pub stay: bool,
     /// Whether every capsule is presented on one line, a capsule at a time.
     pub shared_console: bool,
     /// The firmware's clock when the supervisor started, if it has one.
@@ -60,12 +64,15 @@ pub fn provision() -> Provision {
         second: t.second(),
     });
     match read_esp() {
-        Ok((capsules, shared_console)) => Provision { capsules, shared_console, wall_clock, error: None },
-        Err(error) => Provision { capsules: Vec::new(), shared_console: false, wall_clock, error: Some(error) },
+        Ok(mut provision) => {
+            provision.wall_clock = wall_clock;
+            provision
+        }
+        Err(error) => Provision { wall_clock, error: Some(error), ..Provision::default() },
     }
 }
 
-fn read_esp() -> Result<(Vec<CapsuleSpec>, bool), String> {
+fn read_esp() -> Result<Provision, String> {
     let volume =
         uefi::boot::get_image_file_system(uefi::boot::image_handle()).map_err(|e| format!("boot volume: {e}"))?;
     let mut fs = FileSystem::new(volume);
@@ -86,9 +93,14 @@ fn read_esp() -> Result<(Vec<CapsuleSpec>, bool), String> {
 
     let mut capsules = Vec::new();
     let mut shared_console = false;
+    let mut stay = false;
     for line in manifest.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         if line == "console mux" {
             shared_console = true;
+            continue;
+        }
+        if line == "supervisor stay" {
+            stay = true;
             continue;
         }
         let rest = line.strip_prefix("run ").ok_or_else(|| format!("BOOT.CFG: unknown directive: {line}"))?;
@@ -100,14 +112,9 @@ fn read_esp() -> Result<(Vec<CapsuleSpec>, bool), String> {
             rest = after.trim_start();
         }
         let (program, tail) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
-        capsules.push(CapsuleSpec {
-            cpu_limit,
-            program: program.to_string(),
-            tail: tail.as_bytes().to_vec(),
-            files: files.clone(),
-        });
+        capsules.push(CapsuleSpec { cpu_limit, program: program.to_string(), tail: tail.as_bytes().to_vec() });
     }
-    Ok((capsules, shared_console))
+    Ok(Provision { capsules, files, stay, shared_console, wall_clock: None, error: None })
 }
 
 /// The end of the highest region of actual memory in the firmware's map.

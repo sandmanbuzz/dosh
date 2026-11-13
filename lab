@@ -3,6 +3,7 @@
 #
 #   ./lab                 shell
 #   ./lab make test       build everything and run the acceptance tests
+#   ./lab --net tools/doshlab.py serve    a DOSH that stays up, on TCP ports
 #
 # The image is built on first use and rebuilt whenever its Containerfile
 # changes. The checkout is mounted at /work; build caches live in .lab/ and
@@ -21,11 +22,14 @@ kvm=
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then kvm="--device /dev/kvm"; fi
 tty=-i
 if [ -t 0 ] && [ -t 1 ]; then tty=-it; fi
+# --net shares the host's network, for commands that serve on TCP.
+net=
+if [ "${1:-}" = "--net" ]; then net="--network host"; shift; fi
 [ $# -gt 0 ] || set -- bash
 
 mkdir -p "$root/.lab/home"
 # shellcheck disable=SC2086
-exec podman run --rm $tty $kvm \
+exec podman run --rm $tty $kvm $net \
     --userns=keep-id --security-opt label=disable \
     -v "$root:/work" -w /work \
     -e HOME=/work/.lab/home -e CARGO_HOME=/work/.lab/cargo \

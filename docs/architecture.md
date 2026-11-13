@@ -29,7 +29,7 @@ boot services exist it does exactly two things: claims a fixed pool of
 memory (64 MiB) for everything it will ever allocate, and reads its work
 from the EFI system partition it booted from — `\DOSH\BOOT.CFG`, one
 `run [limit=SECONDS] PROGRAM [arguments]` line per capsule, and `\DOSH\C\`, the files each
-capsule finds on drive C:. A `console mux` line puts every capsule on one
+capsule finds on drive C:. A `supervisor stay` line keeps the supervisor up for the operator's commands. A `console mux` line puts every capsule on one
 serial line, switched with Ctrl-] and a number (see `present.rs`). `limit=` is a watchdog: a capsule that has used
 that much processor time (ticks that found it running, not time spent idle or
 waiting for input) is stopped with a fault that says so. It also reads the
@@ -53,8 +53,52 @@ calibration.
 
 **Supervision** (`main.rs`). Hardware virtualization is enabled, one capsule
 is built per manifest line, and the scheduler runs them round-robin until
-none is live. Then the machine powers off. A supervisor that stays up and
-waits for more work is on the roadmap.
+none is live. Then the machine powers off.
+
+With `supervisor stay` in the manifest the supervisor does not power off
+when the manifest's capsules are done. It listens on COM1 for the
+operator's commands (`mgmt.rs`): list, launch, suspend, resume, kill, show
+and store files on the persistent disk, shut down. The replies are log lines
+(`mgmt cmd=... status=ok|error`), so one line carries both the command and
+the supervisor's account of what happened. Suspending a capsule stops
+scheduling it and freezes its clock (the guest does not see the pause).
+A capsule that finishes or is killed is *retired*: its guest memory and
+drive go back to the pool, and only its endpoint stays, because on a shared
+console line the shown capsule's endpoint is what hears Ctrl-].
+
+## Storage
+
+`dosh-fat` (`crates/fat`) is a small FAT16/FAT32 driver for the files in a
+root directory, over any `Block` device. `platform/virtio.rs` is the one
+block device: a polled virtio-blk driver on the legacy I/O-port interface,
+found by scanning PCI. The supervisor attaches the first such device whose
+FAT volume is labelled `DOSHDATA` (`storage.rs`) and leaves every other
+disk alone, so the firmware's boot disk is never touched.
+
+The disk is the persistent half of drive C:. A capsule launched at any time
+finds the ESP's `\DOSH\C\` files with the disk's files laid over them. When
+a program exits (not when it faults or is killed) the files it created or
+changed are written to the disk and the ones it deleted are removed from
+it, and the supervisor logs each (`storage event=write ...`). The disk is
+synchronous: when the log line appears the data has been handed to the
+device. Two capsules that change the same file race, and the last to exit
+wins.
+
+Legacy virtio rather than modern because the legacy registers are in an
+I/O BAR, in the first 64 KiB of port space, whereas a modern device's are
+in a memory BAR the firmware may put above anything the supervisor maps.
+Real hardware will want AHCI or NVMe, or a wider identity map; neither is
+needed to prove persistence. The disk image is also an ordinary FAT image:
+`mdir`, `mcopy` and `mtype` read and write it while no supervisor has it.
+
+## Reaching a running supervisor
+
+`tools/doshlab.py serve` boots a supervisor that stays up and puts two
+serial lines on TCP ports: COM1 (log and management) and COM2 (every
+capsule's console, shared and switched with Ctrl-] and a digit). `socat`
+from anywhere that can reach those ports attaches. The wire is QEMU's: the
+supervisor has no network driver of its own (see the roadmap). The lines are
+unauthenticated, so they listen on loopback unless told otherwise.
 
 The supervisor log on COM1 records each stage as a line of `key=value`
 pairs. Booting, enabling virtualization, and a guest actually running are
@@ -246,10 +290,10 @@ local display instead of a terminal means rendering the same `Snapshot`.
 - **The lab is a container**, and Python test tooling runs inside it with
   the distribution's pytest, rather than in a per-project virtualenv on the
   host. One environment to reproduce instead of two.
-- **Work is provisioned at boot, from the boot volume.** The supervisor has
-  no storage or network drivers after `ExitBootServices`, so drive C: is
-  held in memory and changes to it are not written back. "Launch remotely"
-  needs a control channel that does not exist yet.
+- **Work is provisioned from the boot volume, and from a persistent disk.**
+  Drive C: is held in memory while a capsule runs and written back to the
+  persistent disk when it exits. There is no network driver; remote
+  operation goes over serial lines that the lab's QEMU puts on TCP.
 
 ## Known limits of the current design
 
@@ -257,8 +301,13 @@ local display instead of a terminal means rendering the same `Snapshot`.
 - A fixed 64 MiB pool; exhausting it is a supervisor panic (logged, then
   power-off). Per-capsule accounting is partial: drive C: growth and
   console input backlog are bounded, nothing else needs to be yet.
-- No capsule can be stopped from outside. One that never exits keeps DOSH
-  running forever, though it cannot starve the others.
+- A capsule can be stopped from outside only on a supervisor that stays up
+  (`kill`). Without `supervisor stay`, one that never exits keeps DOSH
+  running forever, though it cannot starve the others; use `limit=`.
+- The management channel has no authentication. Whoever reaches COM1
+  operates the machine.
+- Every launch copies the base drive and the disk's files into the new
+  capsule, so a large disk costs memory per live capsule (at most 24).
 - The display is text mode only: one page, modes 2 and 3, no graphics and
   no blink or intensity distinction beyond what ANSI gives.
 - Console input is polled once per slice; a serial peer sending faster
