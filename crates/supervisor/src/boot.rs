@@ -26,6 +26,8 @@ const POOL_BYTES: usize = 64 << 20;
 static HEAP: LockedHeap = LockedHeap::empty();
 
 pub struct CapsuleSpec {
+    /// CPU time the capsule may use, in seconds, before the supervisor stops it.
+    pub cpu_limit: Option<u64>,
     pub program: String,
     /// The command tail exactly as DOS would pass it, leading space included.
     pub tail: Vec<u8>,
@@ -83,9 +85,16 @@ fn read_esp() -> Result<Vec<CapsuleSpec>, String> {
     let mut capsules = Vec::new();
     for line in manifest.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         let rest = line.strip_prefix("run ").ok_or_else(|| format!("BOOT.CFG: unknown directive: {line}"))?;
-        let rest = rest.trim_start();
+        let mut rest = rest.trim_start();
+        let mut cpu_limit = None;
+        while let Some(option) = rest.strip_prefix("limit=") {
+            let (seconds, after) = option.split_at(option.find(' ').unwrap_or(option.len()));
+            cpu_limit = Some(seconds.parse().map_err(|_| format!("BOOT.CFG: bad limit: {line}"))?);
+            rest = after.trim_start();
+        }
         let (program, tail) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
         capsules.push(CapsuleSpec {
+            cpu_limit,
             program: program.to_string(),
             tail: tail.as_bytes().to_vec(),
             files: files.clone(),

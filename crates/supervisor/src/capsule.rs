@@ -51,6 +51,8 @@ pub struct Capsule {
     preemptions: u64,
     /// Port accesses that reached no device.
     stray_io: u64,
+    /// Clock ticks of processor time the guest may use before it is stopped.
+    tick_budget: Option<u64>,
     /// Whether the endpoint has switched from the byte stream to the screen.
     screen_shown: bool,
     /// The provisioned files, by name and content hash, to tell what the program changed.
@@ -134,6 +136,7 @@ impl Capsule {
             state: State::Running,
             exits: 0,
             preemptions: 0,
+            tick_budget: spec.cpu_limit.map(|seconds| seconds.saturating_mul(timer::TICK_HZ as u64)),
             stray_io: 0,
             screen_shown: false,
             stocked,
@@ -249,7 +252,16 @@ impl Capsule {
             }
             Exit::MemoryFault { address } => self.fault_here(format!("access to unmapped memory at {address:#x}")),
             Exit::Shutdown => self.fault_here("triple fault".into()),
-            Exit::Preempted => self.preemptions += 1,
+            Exit::Preempted => {
+                self.preemptions += 1;
+                // A tick that finds the guest running is a tick it used.
+                if self.tick_budget.is_some_and(|budget| self.preemptions >= budget) {
+                    self.fault_here(format!(
+                        "watchdog: used its {} s of processor time",
+                        self.preemptions / timer::TICK_HZ as u64
+                    ));
+                }
+            }
             Exit::Nmi => log!("capsule id={} event=nmi total={}", self.id, platform::nmis()),
             Exit::Forbidden { code, info } => {
                 self.fault_here(format!("forbidden operation (exit code {code:#x}, info {info:#x})"))

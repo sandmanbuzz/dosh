@@ -130,6 +130,13 @@ def test_the_command_interpreter_runs_commands_and_programs(dosh):
     assert exited(result) == 0
 
 
+def test_the_watchdog_stops_a_capsule_that_never_ends(dosh):
+    # The capsule beside it is unaffected: it finishes while the other is cut off.
+    result = dosh("limit=1 LOOP.COM", "HELLO.COM")
+    assert faulted(result, 0) == "watchdog: used its 1 s of processor time"
+    assert exited(result, 1) == 0 and result.consoles[1] == b"Hello from DOS!\r\n"
+
+
 def test_dos_date_and_time_come_from_the_wall_clock(dosh):
     # The lab sets the virtual RTC to Monday 2031-02-03 12:00:00.
     result = dosh("DATE.COM")

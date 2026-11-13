@@ -214,7 +214,7 @@ def run(
     """
     files = dict(files or {})
     for line in runs:
-        program = line.split()[0]
+        program = next(word for word in line.split() if not word.startswith("limit="))
         if (GUESTS / program).exists():
             files.setdefault(program, (GUESTS / program).read_bytes())
 
