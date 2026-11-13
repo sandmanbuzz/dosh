@@ -42,8 +42,10 @@ registers are off limits, and touching them faults the capsule.
 The only hardware interrupt delivered is the clock tick, `INT 08h`. There is
 no keyboard interrupt yet. The BIOS clock is kept current in the
 BIOS data area (0040:006Ch, the tick count, and 0040:0070h, the midnight
-flag), and `INT 1Ah AH=00h` reads it. The clock tick is delivered as `INT 08h`
-to any program that has interrupts enabled, through the IVT. A `HLT` outside
+flag), and `INT 1Ah AH=00h` reads it. The BIOS clock advances at its own
+rate, about 18.2 a second of elapsed time, and each advance is delivered as
+`INT 08h` to any program with interrupts enabled, through the IVT. The
+supervisor's scheduling quantum is not visible to the guest. A `HLT` outside
 a service gate sleeps the program until the next tick, and faults if
 interrupts are disabled, because nothing would ever wake it.
 

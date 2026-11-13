@@ -59,6 +59,20 @@ def test_a_program_halts_until_the_clock_interrupts_it(dosh):
     assert exited(result) == 0
 
 
+def test_guest_clock_interrupts_at_the_bios_rate(dosh):
+    # INT 08h delivery follows elapsed BIOS time: 16 to 19 ticks in 18 ticks.
+    result = dosh("RATE.COM")
+    assert result.consoles[0] == b"RATE OK\r\n"
+    assert exited(result) == 0
+
+
+def test_guest_clock_rate_holds_beside_a_busy_capsule(dosh):
+    # SPIN keeps the processor busy with interrupts off; the clock must still
+    # be delivered to RATE at the BIOS rate while SPIN is running.
+    result = dosh("RATE.COM", "SPIN.COM")
+    assert result.consoles[0] == b"RATE OK\r\n"
+    assert exited(result, 0) == 0
+
 
 def test_halt_with_interrupts_disabled_faults_with_a_reason(dosh):
     """HLT with IF=0 could never be woken, so the capsule must say so."""

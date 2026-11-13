@@ -49,8 +49,6 @@ pub struct Capsule {
     preemptions: u64,
     /// Port accesses that reached no device.
     stray_io: u64,
-    /// The clock tick count when the guest halted; a later count wakes it.
-    halted_at: u64,
 }
 
 fn regs_of(cpu: &Cpu) -> Regs {
@@ -124,7 +122,6 @@ impl Capsule {
             exits: 0,
             preemptions: 0,
             stray_io: 0,
-            halted_at: 0,
         };
         match loaded {
             Ok(regs) => {
@@ -168,12 +165,15 @@ impl Capsule {
         self.endpoint.pump(&mut self.console);
         // The clock advances whether or not the guest runs, so a capsule that
         // is waiting for input still sees midnight.
-        self.dos.set_clock(&mut Mem::new(self.vm.ram()), timer::ticks());
-        if self.state == State::Halted && timer::ticks() != self.halted_at {
-            // The tick wakes the guest: the interrupt is taken after the HLT.
-            self.vm.cpu.rip = (self.vm.cpu.rip as u16).wrapping_add(1) as u64;
+        // The guest's clock is its own BIOS count, which follows elapsed time,
+        // not the supervisor's quantum: one INT 08h per count advance.
+        if self.dos.set_clock(&mut Mem::new(self.vm.ram()), timer::ticks()) {
             self.vm.post_interrupt(TICK_VECTOR);
-            self.state = State::Running;
+            if self.state == State::Halted {
+                // The interrupt is taken after the HLT that put us to sleep.
+                self.vm.cpu.rip = (self.vm.cpu.rip as u16).wrapping_add(1) as u64;
+                self.state = State::Running;
+            }
         }
         let ran = match self.state {
             State::Running => {
@@ -207,10 +207,7 @@ impl Capsule {
             }
             Exit::MemoryFault { address } => self.fault_here(format!("access to unmapped memory at {address:#x}")),
             Exit::Shutdown => self.fault_here("triple fault".into()),
-            Exit::Preempted => {
-                self.preemptions += 1;
-                self.vm.post_interrupt(TICK_VECTOR);
-            }
+            Exit::Preempted => self.preemptions += 1,
             Exit::Forbidden { code, info } => {
                 self.fault_here(format!("forbidden operation (exit code {code:#x}, info {info:#x})"))
             }
@@ -269,7 +266,6 @@ impl Capsule {
             self.vm.cpu.rip = (self.vm.cpu.rip as u16).wrapping_add(1) as u64;
             return;
         }
-        self.halted_at = timer::ticks();
         self.state = State::Halted;
     }
 

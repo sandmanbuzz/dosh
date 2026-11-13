@@ -156,15 +156,19 @@ impl Dos {
     }
 
     /// Advance the BIOS clock to `hz100`, the capsule's monotonic clock in
-    /// hundredths of a second. The supervisor calls this before each run of
+    /// hundredths of a second. The supervisor calls this before each step of
     /// the guest, so the guest reads the time from memory and from `INT 1Ah`.
-    pub fn set_clock(&mut self, mem: &mut Mem, hz100: u64) {
+    /// Returns whether the BIOS count has advanced since the last call: that
+    /// is one `INT 08h` for the guest, however many ticks were missed.
+    pub fn set_clock(&mut self, mem: &mut Mem, hz100: u64) -> bool {
         let count = firmware::ticks_at(hz100);
+        let advanced = count != self.bios_ticks;
         if count < self.bios_ticks {
             firmware::set_midnight(mem);
         }
         self.bios_ticks = count;
         firmware::write_ticks(mem, count);
+        advanced
     }
 
     /// Load `program` from C: as the capsule's root process. Returns the
