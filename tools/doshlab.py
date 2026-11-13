@@ -259,12 +259,14 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--attach", action="store_true", help="use this terminal as the first capsule's console")
     parser.add_argument("--keep", type=Path, help="keep the run directory (disk image, logs) here")
+    parser.add_argument("--corpus", type=Path, metavar="DIR", help="put every file in DIR on drive C:")
     parser.add_argument("--raw", action="store_true", help="print the whole COM1 log, firmware output included")
     args = parser.parse_args()
 
     stdin = [] if args.attach or sys.stdin.isatty() else [sys.stdin.buffer.read()]
+    files = {p.name.upper(): p.read_bytes() for p in args.corpus.iterdir() if p.is_file()} if args.corpus else None
     result = run(
-        args.runs, accel=args.accel, stdin=stdin, timeout=args.timeout, keep=args.keep, attach=args.attach
+        args.runs, files=files, accel=args.accel, stdin=stdin, timeout=args.timeout, keep=args.keep, attach=args.attach
     )
     for i, console in enumerate(result.consoles[: len(args.runs)]):
         if args.attach and i == 0:

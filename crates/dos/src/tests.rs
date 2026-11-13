@@ -442,3 +442,26 @@ fn timer_gate_stub_targets_int_1ch() {
     assert_eq!(firmware::gate_vector(firmware::GATE_SEG, 0x70), Some(0x1C));
     assert_eq!(firmware::gate_vector(firmware::GATE_SEG, 0x21), None);
 }
+
+#[test]
+fn parse_filename_fills_an_fcb() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    let parse = |m: &mut Machine, text: &[u8], al: u8| {
+        m.mem().write(ds, 0x200, text);
+        m.mem().write(ds, 0x300, &[0xEE; 12]);
+        m.regs.es = ds;
+        m.regs.si = 0x200;
+        m.regs.di = 0x300;
+        assert!(m.call(0x2900 | al as u16));
+        let mut fcb = [0; 12];
+        m.mem().read(ds, 0x300, &mut fcb);
+        (m.regs.ax as u8, m.regs.si - 0x200, fcb)
+    };
+    assert_eq!(parse(&mut m, b"c:readme.txt\0", 0), (0, 12, *b"\x03README  TXT"));
+    assert_eq!(parse(&mut m, b"  Foo*.c x\0", 1), (1, 8, *b"\x00FOO?????C  "));
+    assert_eq!(parse(&mut m, b"x?z\0", 0), (1, 3, *b"\x00X?Z        "));
+    assert_eq!(parse(&mut m, b"d:f\0", 0).0, 0xFF);
+    // Absent parts are left alone when asked.
+    assert_eq!(parse(&mut m, b"abc\0", 0b1110), (0, 3, *b"\xEEABC     \xEE\xEE\xEE"));
+}

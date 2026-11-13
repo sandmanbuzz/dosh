@@ -242,6 +242,10 @@ impl Dos {
                 mem.w16(0, slot + 2, r.ds);
                 return Outcome::Resume;
             }
+            0x29 => {
+                crate::fcb::parse_filename(r, mem);
+                return Outcome::Resume;
+            }
             0x2F => {
                 (r.es, r.bx) = self.dta;
                 return Outcome::Resume;

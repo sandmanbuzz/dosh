@@ -23,6 +23,7 @@ extern crate alloc;
 
 mod arena;
 mod exec;
+mod fcb;
 mod files;
 pub mod firmware;
 mod int21;
