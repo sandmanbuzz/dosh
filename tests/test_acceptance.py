@@ -352,3 +352,43 @@ def test_arc_crunches_a_file_into_a_new_archive(dosh):
     result = dosh("ARC.EXE a T.ARC FOX.TXT", files={"ARC.EXE": corpus_file("early", "ARC.EXE"), "FOX.TXT": text})
     assert exited(result) == 0
     assert b"Adding file:   FOX.TXT" in result.consoles[0] and b"done" in result.consoles[0]
+
+
+# --- the text display and the keyboard ------------------------------------------
+
+
+def test_screen_program_draws_and_reads_a_key(dosh):
+    up_arrow = b"\x1b[A"
+    result = dosh("SCREEN.COM", stdin=[up_arrow])
+    assert exited(result) == 0x48, "INT 16h reports the up arrow as scan code 48h"
+    screen = result.screen()
+    assert screen[2] == " " * 10 + "Hello, screen", "DOS console output lands at the cursor"
+    assert screen[5] == "Direct store", "a direct store into B800:0000"
+    assert screen[6] == "╔", "code page 437 glyphs reach the terminal"
+    assert screen[8] == "scan=48"
+
+
+def test_screen_programs_start_as_a_byte_stream(dosh):
+    # Nothing here touches the video BIOS, so the console stays a stream.
+    result = dosh("HELLO.COM")
+    assert result.consoles[0].startswith(b"Hello from DOS!")
+    assert b"\x1b[" not in result.consoles[0]
+
+
+@pytest.mark.parametrize(
+    "folder, program, banner",
+    [
+        ("earliest", "TURBO.COM", "TURBO Pascal system"),
+        ("earliest", "VC.COM", "VisiCalc Advanced Version"),
+        ("early", "WS.COM", "WordStar Release 3.31q"),
+    ],
+)
+def test_full_screen_programs_put_up_their_first_screen(accel, folder, program, banner):
+    """Each of these waits for a person; the first screen is the proof."""
+    files = {program: corpus_file(folder, program)}
+    for extra in (CORPUS / folder).iterdir():
+        files.setdefault(extra.name, extra.read_bytes())
+    result = doshlab.run([program], accel=accel, files=files, timeout=10)
+    assert result.timed_out, f"the program should be waiting for a key:\n{result.log}"
+    assert not result.find("capsule", event="fault"), result.log
+    assert any(banner in row for row in result.screen()), "\n".join(result.screen())

@@ -25,12 +25,17 @@ name = "dosh"
 version = "0.1.0"
 dependencies = [
  "dosh-dos",
+ "dosh-term",
  "linked_list_allocator",
  "uefi",
 ]
 
 [[package]]
 name = "dosh-dos"
+version = "0.1.0"
+
+[[package]]
+name = "dosh-term"
 version = "0.1.0"
 
 [[package]]

@@ -58,6 +58,11 @@ impl Machine {
         (outcome, self.regs.flags)
     }
 
+    fn raise_ah(&mut self, ah: u8) {
+        self.regs.ax = (ah as u16) << 8;
+        assert_eq!(self.raise(0x10).0, Outcome::Resume);
+    }
+
     fn call(&mut self, ax: u16) -> bool {
         self.regs.ax = ax;
         let (outcome, flags) = self.int21();
@@ -598,4 +603,101 @@ fn ioctl_status_follows_the_input_state() {
     assert_eq!(m.regs.ax as u8, 0, "at end of file");
     m.regs.bx = 99;
     assert!(!m.call(0x4406));
+}
+
+fn screen_text(m: &mut Machine, row: usize) -> String {
+    let mem = m.mem();
+    (0..80).map(|c| mem.r8(0xB800, ((row * 80 + c) * 2) as u16) as char).collect::<String>().trim_end().to_string()
+}
+
+#[test]
+fn video_bios_drives_the_text_buffer() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    assert!(!m.dos.screen_active());
+    let call10 = |m: &mut Machine, ax: u16| {
+        m.regs.ax = ax;
+        let (outcome, _) = m.raise(0x10);
+        assert_eq!(outcome, Outcome::Resume);
+    };
+    call10(&mut m, 0x0F00);
+    assert!(m.dos.screen_active());
+    assert_eq!((m.regs.ax, m.regs.bx >> 8), (0x5003, 0), "80 columns, mode 3, page 0");
+    // Write with an attribute, then move and read back.
+    (m.regs.bx, m.regs.cx) = (0x001E, 3);
+    call10(&mut m, 0x0941);
+    m.regs.dx = 0x0105; // row 1, column 5
+    m.regs.bx = 0;
+    call10(&mut m, 0x0200);
+    m.regs.dx = 0;
+    call10(&mut m, 0x0300);
+    assert_eq!(m.regs.dx, 0x0105);
+    assert_eq!(screen_text(&mut m, 0), "AAA");
+    assert_eq!(m.mem().r8(0xB800, 1), 0x1E);
+    m.regs.dx = 0x0000;
+    call10(&mut m, 0x0200);
+    call10(&mut m, 0x0800);
+    assert_eq!(m.regs.ax, 0x1E41);
+    // Scroll up one line over the whole screen: row 0 goes away.
+    m.mem().write(0xB800, 160, &[b'Z', 0x07]);
+    (m.regs.bx, m.regs.cx, m.regs.dx) = (0x4F00, 0, 0x184F);
+    call10(&mut m, 0x0601);
+    assert_eq!(screen_text(&mut m, 0), "Z");
+    assert_eq!(m.mem().r16(0xB800, 24 * 160), 0x4F20, "vacated row takes the fill attribute");
+    // Clearing a window.
+    (m.regs.bx, m.regs.cx, m.regs.dx) = (0x0700, 0, 0x184F);
+    call10(&mut m, 0x0600);
+    assert_eq!(screen_text(&mut m, 0), "");
+    // Unsupported modes and pages fault by name.
+    m.regs.ax = 0x0013;
+    assert_eq!(m.raise(0x10).0, Outcome::Fault(Fault::Unimplemented { vector: 0x10, ah: 0, al: 0x13 }));
+    // The EGA probe leaves BL alone: there is no EGA.
+    (m.regs.bx, m.regs.ax) = (0x0010, 0x1200);
+    assert_eq!(m.raise(0x10).0, Outcome::Resume);
+    assert_eq!(m.regs.bx, 0x0010);
+}
+
+#[test]
+fn console_output_scrolls_and_wraps_on_the_screen() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    video::write_console(&mut Mem::new(&mut m.ram), b"ab\r\ncd\tx".iter().copied());
+    assert_eq!(screen_text(&mut m, 0), "ab");
+    assert_eq!(screen_text(&mut m, 1), "cd      x");
+    video::write_console(
+        &mut Mem::new(&mut m.ram),
+        core::iter::repeat_n(b'x', 80).chain(*b"\r\n").chain(core::iter::repeat_n(b'\n', 30)),
+    );
+    assert_eq!(screen_text(&mut m, 24), "");
+    // Position after: bottom row, column 0.
+    assert_eq!((m.mem().r8(0x40, 0x50), m.mem().r8(0x40, 0x51)), (0, 24));
+}
+
+#[test]
+fn keyboard_decodes_terminal_input_into_bios_keys() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    let key = |m: &mut Machine, ah: u8| {
+        m.regs.ax = (ah as u16) << 8;
+        let (outcome, flags) = m.raise(0x16);
+        (outcome, m.regs.ax, flags & FLAG_ZF != 0)
+    };
+    // Nothing typed: peek reports it, read waits.
+    assert!(key(&mut m, 1).2);
+    assert_eq!(key(&mut m, 0).0, Outcome::WaitInput);
+    m.con.input.extend(b"a\x1b[A\x1bOP\x1b[15~\x1b[3~\r\n\x1b\x03\x1b[[B");
+    assert_eq!(key(&mut m, 1), (Outcome::Resume, 0x1E61, false));
+    let all: Vec<u16> = (0..9).map(|_| key(&mut m, 0).1).collect();
+    assert_eq!(all, [0x1E61, 0x4800, 0x3B00, 0x3F00, 0x5300, 0x1C0D, 0x011B, 0x2E03, 0x3C00]);
+    assert_eq!(key(&mut m, 0x10).0, Outcome::WaitInput, "CR LF is one Enter");
+}
+
+#[test]
+fn dos_input_reads_extended_keys_as_zero_then_scan_code() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    m.raise_ah(0x0F); // touch the video BIOS so the program has a screen
+    m.con.input.extend(b"\x1b[B!");
+    let mut got = vec![];
+    for _ in 0..3 {
+        assert!(m.call(0x0800));
+        got.push(m.regs.ax as u8);
+    }
+    assert_eq!(got, [0, 0x50, b'!']);
 }

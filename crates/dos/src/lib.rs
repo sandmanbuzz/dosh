@@ -27,9 +27,11 @@ mod fcb;
 mod files;
 pub mod firmware;
 mod int21;
+mod keyboard;
 mod mem;
 #[cfg(test)]
 mod tests;
+pub mod video;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -123,6 +125,12 @@ pub struct Dos {
     open: Vec<Option<(files::Handle, u8)>>,
     /// A key read ahead by an input-status call.
     key: Option<u8>,
+    kbd: keyboard::Keyboard,
+    /// The second half of an extended key: DOS returns 0, then this.
+    key_scan: Option<u8>,
+    /// Whether the program has taken the display over. Until it does, the
+    /// console is a plain byte stream.
+    screen: bool,
     /// The console line being edited.
     line: Vec<u8>,
     /// A finished console line not yet consumed by handle reads.
@@ -139,6 +147,7 @@ impl Dos {
     pub fn new(mem: &mut Mem, volume: Volume) -> Self {
         firmware::install(mem);
         arena::init(mem);
+        video::init(mem);
         let mut handles = [None; 20];
         // stdin, stdout, stderr, and the aux and printer devices nobody has.
         handles[..3].fill(Some(0));
@@ -151,11 +160,27 @@ impl Dos {
             handles,
             open,
             key: None,
+            kbd: keyboard::Keyboard::default(),
+            key_scan: None,
+            screen: false,
             line: Vec::new(),
             cooked: VecDeque::new(),
             last_error: 0,
             bios_ticks: 0,
         }
+    }
+
+    /// Whether the program has used the display. From then on its console
+    /// output belongs on the screen (see [`Dos::draw_console`]) and
+    /// presentation shows the screen, not the byte stream.
+    pub fn screen_active(&self) -> bool {
+        self.screen
+    }
+
+    /// Put console output on the screen. Only meaningful once the screen is
+    /// active; the byte stream and the screen are one console, not two.
+    pub fn draw_console(&mut self, mem: &mut Mem, bytes: impl IntoIterator<Item = u8>) {
+        video::write_console(mem, bytes);
     }
 
     pub fn volume(&self) -> &Volume {
@@ -203,6 +228,11 @@ impl Dos {
                 con.write(regs.al());
                 Outcome::Resume
             }
+            0x10 => {
+                self.screen = true;
+                video::int10(regs, mem)
+            }
+            0x16 => self.int16(regs, con),
             0x11 => {
                 regs.ax = firmware::EQUIPMENT;
                 Outcome::Resume

@@ -76,6 +76,10 @@ class Result:
     capsules: dict[int, dict[str, str]] = field(default_factory=dict)
     """Per capsule id, its final event: exit (with code) or fault."""
 
+    def screen(self, capsule: int = 0) -> list[str]:
+        """The 25 rows a terminal attached to the capsule would show."""
+        return render_screen(self.consoles[capsule])
+
     def find(self, subject: str, **match: str) -> list[dict[str, str]]:
         return [e for e in self.events if e["subject"] == subject and all(e.get(k) == v for k, v in match.items())]
 
@@ -83,6 +87,37 @@ class Result:
         found = self.find(subject, **match)
         assert len(found) == 1, f"expected one {subject} {match} event, got {found}\n{self.log}"
         return found[0]
+
+
+def render_screen(stream: bytes, rows: int = 25, cols: int = 80) -> list[str]:
+    """What an 80x25 terminal shows after `stream`: the subset of ANSI that
+    DOSH sends (cursor positioning, clear, colours, cursor visibility)."""
+    grid = [[" "] * cols for _ in range(rows)]
+    row = col = 0
+    text = stream.decode("utf-8", errors="replace")
+    i = 0
+    while i < len(text):
+        c = text[i]
+        i += 1
+        if c == "\x1b" and text[i : i + 1] == "[":
+            m = re.compile(r"\[([0-9;?]*)([@-~])").match(text, i)
+            if not m:
+                break
+            params, final = m.groups()
+            i = m.end()
+            nums = [int(n) if n else 0 for n in params.lstrip("?").split(";")] if params else []
+            if final == "H":
+                row, col = (nums[0] - 1 if nums else 0), (nums[1] - 1 if len(nums) > 1 else 0)
+            elif final == "J" and nums[:1] == [2]:
+                grid = [[" "] * cols for _ in range(rows)]
+        elif c == "\r":
+            col = 0
+        elif c == "\n":
+            row = min(row + 1, rows - 1)
+        elif c >= " " and 0 <= row < rows and 0 <= col < cols:
+            grid[row][col] = c
+            col += 1
+    return ["".join(r).rstrip() for r in grid]
 
 
 def parse_events(log: str) -> list[dict[str, str]]:
@@ -260,6 +295,7 @@ def main() -> int:
     parser.add_argument("--attach", action="store_true", help="use this terminal as the first capsule's console")
     parser.add_argument("--keep", type=Path, help="keep the run directory (disk image, logs) here")
     parser.add_argument("--corpus", type=Path, metavar="DIR", help="put every file in DIR on drive C:")
+    parser.add_argument("--screen", action="store_true", help="show consoles as the 80x25 screen they draw")
     parser.add_argument("--raw", action="store_true", help="print the whole COM1 log, firmware output included")
     args = parser.parse_args()
 
@@ -272,9 +308,9 @@ def main() -> int:
         if args.attach and i == 0:
             print()
             continue
-        print(f"--- capsule {i} console ---")
+        print(f"--- capsule {i} {'screen' if args.screen else 'console'} ---")
         sys.stdout.flush()
-        sys.stdout.buffer.write(console)
+        sys.stdout.buffer.write("\n".join(result.screen(i)).encode() if args.screen else console)
         sys.stdout.flush()
         print()
     print(f"--- supervisor log ({args.accel}, {result.seconds:.1f}s) ---")

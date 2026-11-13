@@ -8,10 +8,10 @@
 use alloc::format;
 use alloc::string::String;
 
-use dosh_dos::{firmware, Dos, Fault, Mem, Outcome, Regs, Volume, RAM_SIZE};
+use dosh_dos::{firmware, video, Dos, Fault, Mem, Outcome, Regs, Volume, RAM_SIZE};
 
 use crate::boot::CapsuleSpec;
-use crate::device::Console;
+use crate::device::{Cga, Console};
 use crate::hv::{self, Cpu, Exit, Segment};
 use crate::log;
 use crate::platform::{self, timer};
@@ -41,6 +41,7 @@ pub struct Capsule {
     vm: hv::Vm,
     dos: Dos,
     console: Console,
+    cga: Cga,
     endpoint: Endpoint,
     state: State,
     /// Times the guest has left native execution for the supervisor.
@@ -49,6 +50,10 @@ pub struct Capsule {
     preemptions: u64,
     /// Port accesses that reached no device.
     stray_io: u64,
+    /// Whether the endpoint has switched from the byte stream to the screen.
+    screen_shown: bool,
+    /// The clock tick at which the screen was last drawn.
+    drawn_at: u64,
 }
 
 fn regs_of(cpu: &Cpu) -> Regs {
@@ -117,11 +122,14 @@ impl Capsule {
             vm,
             dos,
             console: Console::default(),
+            cga: Cga::default(),
             endpoint,
             state: State::Running,
             exits: 0,
             preemptions: 0,
             stray_io: 0,
+            screen_shown: false,
+            drawn_at: 0,
         };
         match loaded {
             Ok(regs) => {
@@ -188,22 +196,48 @@ impl Capsule {
             }
             _ => false,
         };
-        self.endpoint.pump(&mut self.console);
+        self.present();
         ran
+    }
+
+    /// Carry the console to the endpoint. A capsule whose program has taken
+    /// over the display is drawn, at the clock's pace and when it ends; its
+    /// console output lands on that screen rather than in the byte stream.
+    fn present(&mut self) {
+        if self.dos.screen_active() {
+            if !self.screen_shown {
+                self.endpoint.pump(&mut self.console); // the stream so far
+                self.screen_shown = true;
+            }
+            let live = self.is_live();
+            let mut mem = Mem::new(self.vm.ram());
+            self.dos.draw_console(&mut mem, self.console.tx.drain(..));
+            let ticks = timer::ticks();
+            if ticks != self.drawn_at || !live {
+                self.drawn_at = ticks;
+                self.endpoint.show(&video::snapshot(&mem));
+            }
+        }
+        self.endpoint.pump(&mut self.console);
     }
 
     fn handle(&mut self, exit: Exit) {
         match exit {
             Exit::Halt => self.service(),
             Exit::Io { string: true, port, .. } => self.fault_here(format!("string I/O on port {port:#x}")),
-            Exit::Io { input, bytes, next_rip, .. } => {
+            Exit::Io { input, bytes, port, next_rip, .. } => {
                 // No devices are attached to the capsule's I/O bus yet. As on
                 // a PC, writes to an empty address vanish and reads float high.
-                if input {
-                    self.vm.cpu.gprs.rax |= (1u64 << (8 * bytes.min(4))) - 1;
+                if input && port == Cga::STATUS_PORT && bytes == 1 {
+                    let rax = &mut self.vm.cpu.gprs.rax;
+                    *rax = *rax & !0xFF | self.cga.status() as u64;
+                } else {
+                    if input {
+                        self.vm.cpu.gprs.rax |= (1u64 << (8 * bytes.min(4))) - 1;
+                    }
+                    self.stray_io += 1;
                 }
                 self.vm.cpu.rip = next_rip;
-                self.stray_io += 1;
             }
             Exit::MemoryFault { address } => self.fault_here(format!("access to unmapped memory at {address:#x}")),
             Exit::Shutdown => self.fault_here("triple fault".into()),

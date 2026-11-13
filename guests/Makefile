@@ -3,7 +3,7 @@
 # executables write their own header (see mz.inc).
 OUT := ../build/guests
 COM := HELLO A20 EXIT42 RET ARGS UPPER ASK TYPE FILEIO SPIN BADCALL DIVZERO ESCAPE TRIPLE TICK \
-       IRQ HLTCLI RATE TIMERHOOK
+       IRQ HLTCLI RATE TIMERHOOK SCREEN
 EXE := HELLOMZ
 
 all: $(COM:%=$(OUT)/%.COM) $(EXE:%=$(OUT)/%.EXE) $(OUT)/WC.COM

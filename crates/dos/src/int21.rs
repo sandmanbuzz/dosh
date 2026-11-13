@@ -18,15 +18,51 @@ fn path_at(mem: &Mem, seg: u16, off: u16) -> Vec<u8> {
 }
 
 impl Dos {
+    /// The next character for a DOS input call. With a screen, input is
+    /// keystrokes, and an extended key reads as 0 then its scan code.
     fn next_key(&mut self, con: &mut dyn CharDevice) -> Option<u8> {
-        self.key.take().or_else(|| con.read())
+        if let Some(key) = self.key.take() {
+            return Some(key);
+        }
+        if !self.screen {
+            return con.read();
+        }
+        if let Some(scan) = self.key_scan.take() {
+            return Some(scan);
+        }
+        let key = self.kbd.pop(con)?;
+        if key as u8 == 0 {
+            self.key_scan = Some((key >> 8) as u8);
+        }
+        Some(key as u8)
     }
 
     fn key_ready(&mut self, con: &mut dyn CharDevice) -> bool {
         if self.key.is_none() {
-            self.key = con.read();
+            self.key = self.next_key(con);
         }
         self.key.is_some()
+    }
+
+    /// `INT 16h`, the keyboard BIOS.
+    pub(crate) fn int16(&mut self, r: &mut Regs, con: &mut dyn CharDevice) -> Outcome {
+        match r.ah() {
+            0x00 | 0x10 => match self.kbd.pop(con) {
+                Some(key) => r.ax = key,
+                None => return Outcome::WaitInput,
+            },
+            0x01 | 0x11 => {
+                let key = self.kbd.peek(con);
+                r.set_flag(FLAG_ZF, key.is_none());
+                if let Some(key) = key {
+                    r.ax = key;
+                }
+            }
+            // Shift state: a terminal reports none.
+            0x02 | 0x12 => r.ax = 0,
+            ah => return Outcome::Fault(Fault::Unimplemented { vector: 0x16, ah, al: r.al() }),
+        }
+        Outcome::Resume
     }
 
     /// Advance the console line editor with whatever input has arrived.

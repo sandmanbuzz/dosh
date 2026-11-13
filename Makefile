@@ -13,9 +13,9 @@ guests:
 # Static checks and the host-side unit tests of the DOS services.
 check:
 	cargo fmt --check
-	cargo clippy -p dosh-dos --all-targets -- -D warnings
+	cargo clippy -p dosh-dos -p dosh-term --all-targets -- -D warnings
 	cargo clippy -p dosh --release --target x86_64-unknown-uefi -- -D warnings
-	cargo test -p dosh-dos
+	cargo test -p dosh-dos -p dosh-term
 
 # Everything: static checks, unit tests, and the acceptance suite on every
 # execution path this machine offers.
