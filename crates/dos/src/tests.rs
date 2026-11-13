@@ -465,3 +465,90 @@ fn parse_filename_fills_an_fcb() {
     // Absent parts are left alone when asked.
     assert_eq!(parse(&mut m, b"abc\0", 0b1110), (0, 3, *b"\xEEABC     \xEE\xEE\xEE"));
 }
+
+#[test]
+fn find_first_and_next_walk_drive_c() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"abc"), ("B.TXT", b""), ("C.DAT", b"x")], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    m.mem().write(ds, 0x200, b"c:*.txt\0");
+    m.regs.cx = 0;
+    let (dta_off, name_at) = (0x400u16, 0x400 + 30);
+    m.regs.dx = dta_off;
+    assert!(m.call(0x1A00));
+    m.regs.dx = 0x200;
+    let name = |m: &mut Machine| {
+        let mut buf = [0u8; 13];
+        m.mem().read(ds, name_at, &mut buf);
+        let end = buf.iter().position(|&b| b == 0).unwrap();
+        String::from_utf8(buf[..end].to_vec()).unwrap()
+    };
+    assert!(m.call(0x4E00));
+    assert_eq!(name(&mut m), "A.TXT");
+    assert_eq!(m.mem().r16(ds, dta_off + 26), 3);
+    assert!(m.call(0x4F00));
+    assert_eq!(name(&mut m), "B.TXT");
+    assert!(!m.call(0x4F00));
+    assert_eq!(m.regs.ax, 18);
+    m.mem().write(ds, 0x200, b"*.*\0");
+    assert!(m.call(0x4E00));
+    m.mem().write(ds, 0x200, b"NOPE.*\0");
+    assert!(!m.call(0x4E00));
+    assert_eq!(m.regs.ax, 2);
+}
+
+#[test]
+fn file_stamps_default_to_the_epoch_and_can_be_set() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"abc")], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    m.mem().write(ds, 0x200, b"A.TXT\0");
+    m.regs.dx = 0x200;
+    assert!(m.call(0x3D00));
+    m.regs.bx = m.regs.ax;
+    assert!(m.call(0x5700));
+    assert_eq!((m.regs.cx, m.regs.dx), (0, 0x0021));
+    (m.regs.cx, m.regs.dx) = (0x6000, 0x2A4B);
+    assert!(m.call(0x5701));
+    (m.regs.cx, m.regs.dx) = (0, 0);
+    assert!(m.call(0x5700));
+    assert_eq!((m.regs.cx, m.regs.dx), (0x6000, 0x2A4B));
+    m.regs.bx = 0; // the console has no stamp
+    assert!(!m.call(0x5700));
+}
+
+#[test]
+fn duplicated_handles_share_a_position_and_outlive_the_original() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"abcdef")], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    m.mem().write(ds, 0x200, b"A.TXT\0");
+    m.regs.dx = 0x200;
+    assert!(m.call(0x3D00));
+    let a = m.regs.ax;
+    m.regs.bx = a;
+    assert!(m.call(0x4500));
+    let b = m.regs.ax;
+    assert_ne!(a, b);
+    // Reading through one moves the other.
+    let read = |m: &mut Machine, h: u16| {
+        (m.regs.bx, m.regs.cx, m.regs.dx) = (h, 2, 0x300);
+        assert!(m.call(0x3F00));
+        let mut buf = [0; 2];
+        m.mem().read(ds, 0x300, &mut buf);
+        buf
+    };
+    assert_eq!(&read(&mut m, a), b"ab");
+    assert_eq!(&read(&mut m, b), b"cd");
+    m.regs.bx = a;
+    assert!(m.call(0x3E00));
+    assert_eq!(&read(&mut m, b), b"ef");
+    // Closing the last handle frees the entry; the number is then dead.
+    m.regs.bx = b;
+    assert!(m.call(0x3E00));
+    assert!(!m.call(0x3E00));
+    // Force-duplicate stdout onto a closed handle, then write through it.
+    (m.regs.bx, m.regs.cx) = (1, 7);
+    assert!(m.call(0x4600));
+    (m.regs.bx, m.regs.cx, m.regs.dx) = (7, 2, 0x300);
+    m.mem().write(ds, 0x300, b"hi");
+    assert!(m.call(0x4000));
+    assert_eq!(m.con.output, b"hi");
+}

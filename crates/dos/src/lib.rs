@@ -116,7 +116,11 @@ pub struct Dos {
     volume: Volume,
     psp: u16,
     dta: (u16, u16),
-    handles: [Option<files::Handle>; 20],
+    /// The job file table: handle number to an entry of `open`.
+    handles: [Option<usize>; 20],
+    /// The system file table: what is open, and how many handles share it.
+    /// Duplicated handles share one entry, so they share a file position.
+    open: Vec<Option<(files::Handle, u8)>>,
     /// A key read ahead by an input-status call.
     key: Option<u8>,
     /// The console line being edited.
@@ -137,13 +141,15 @@ impl Dos {
         arena::init(mem);
         let mut handles = [None; 20];
         // stdin, stdout, stderr, and the aux and printer devices nobody has.
-        handles[..3].fill(Some(files::Handle::Console));
-        handles[3..5].fill(Some(files::Handle::Null));
+        handles[..3].fill(Some(0));
+        handles[3..5].fill(Some(1));
+        let open = alloc::vec![Some((files::Handle::Console, 3)), Some((files::Handle::Null, 2))];
         Self {
             volume,
             psp: 0,
             dta: (0, 0x80),
             handles,
+            open,
             key: None,
             line: Vec::new(),
             cooked: VecDeque::new(),

@@ -56,7 +56,49 @@ impl Dos {
     }
 
     fn handle(&mut self, bx: u16) -> Result<&mut Handle, u16> {
-        self.handles.get_mut(bx as usize).and_then(Option::as_mut).ok_or(files::ERR_BAD_HANDLE)
+        let entry = self.handles.get(bx as usize).copied().flatten().ok_or(files::ERR_BAD_HANDLE)?;
+        self.open[entry].as_mut().map(|(handle, _)| handle).ok_or(files::ERR_BAD_HANDLE)
+    }
+
+    /// Point handle `at` (or the lowest free one) at system file table entry `entry`.
+    fn attach(&mut self, entry: usize, at: Option<usize>) -> Result<usize, u16> {
+        let at = match at {
+            Some(at) => at,
+            None => self.handles.iter().position(Option::is_none).ok_or(files::ERR_TOO_MANY_OPEN)?,
+        };
+        self.handles[at] = Some(entry);
+        if let Some((_, refs)) = self.open[entry].as_mut() {
+            *refs += 1;
+        }
+        Ok(at)
+    }
+
+    fn detach(&mut self, bx: u16) -> DosResult {
+        let entry = self.handles.get_mut(bx as usize).and_then(Option::take).ok_or(files::ERR_BAD_HANDLE)?;
+        if let Some((_, refs)) = self.open[entry].as_mut() {
+            *refs -= 1;
+            if *refs == 0 {
+                self.open[entry] = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Duplicate handle `bx` (AH=45h) or make `cx` another name for it (AH=46h).
+    fn duplicate(&mut self, r: &mut Regs, onto: bool) -> DosResult {
+        let entry = self.handles.get(r.bx as usize).copied().flatten().ok_or(files::ERR_BAD_HANDLE)?;
+        if !onto {
+            r.ax = self.attach(entry, None)? as u16;
+            return Ok(());
+        }
+        if r.cx as usize >= self.handles.len() {
+            return Err(files::ERR_BAD_HANDLE);
+        }
+        if self.handles[r.cx as usize] != Some(entry) {
+            let _ = self.detach(r.cx); // a handle already open there is closed first
+            self.attach(entry, Some(r.cx as usize))?;
+        }
+        Ok(())
     }
 
     fn open(&mut self, r: &mut Regs, mem: &Mem, create: bool) -> DosResult {
@@ -74,9 +116,21 @@ impl Dos {
                 Handle::File { slot, pos: 0, mode }
             }
         };
-        let free = self.handles.iter().position(Option::is_none).ok_or(files::ERR_TOO_MANY_OPEN)?;
-        self.handles[free] = Some(handle);
-        r.ax = free as u16;
+        let entry = match self.open.iter().position(Option::is_none) {
+            Some(free) => free,
+            None => {
+                self.open.push(None);
+                self.open.len() - 1
+            }
+        };
+        self.open[entry] = Some((handle, 0));
+        match self.attach(entry, None) {
+            Ok(at) => r.ax = at as u16,
+            Err(e) => {
+                self.open[entry] = None;
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
@@ -179,6 +233,64 @@ impl Dos {
         Ok(())
     }
 
+    /// Directory search state lives in the caller's DTA, as in DOS: the
+    /// pattern in bytes 1-11, the next slot to look at in bytes 12-13.
+    fn find_first(&mut self, r: &mut Regs, mem: &mut Mem) -> DosResult {
+        let path = path_at(mem, r.ds, r.dx);
+        let name = match files::resolve(&path)? {
+            Target::File(name) => name,
+            _ => return Err(files::ERR_FILE_NOT_FOUND),
+        };
+        let (seg, off) = self.dta;
+        mem.w8(seg, off, 3);
+        mem.write(seg, off.wrapping_add(1), &files::fcb_name(&name));
+        mem.w16(seg, off.wrapping_add(12), 0);
+        self.find(mem).map_err(|e| if e == files::ERR_NO_MORE_FILES { files::ERR_FILE_NOT_FOUND } else { e })
+    }
+
+    /// Get (AL=0) or set (AL=1) the time and date of an open file.
+    fn file_stamp(&mut self, r: &mut Regs) -> DosResult {
+        let Handle::File { slot, .. } = *self.handle(r.bx)? else {
+            return Err(ERR_BAD_FUNCTION); // devices have no timestamp
+        };
+        match r.al() {
+            0 => (r.cx, r.dx) = self.volume.stamp(slot),
+            1 => self.volume.set_stamp(slot, (r.cx, r.dx)),
+            _ => return Err(ERR_BAD_FUNCTION),
+        }
+        Ok(())
+    }
+
+    fn find_next(&mut self, _r: &mut Regs, mem: &mut Mem) -> DosResult {
+        self.find(mem)
+    }
+
+    fn find(&mut self, mem: &mut Mem) -> DosResult {
+        let (seg, off) = self.dta;
+        let mut pattern = [0; 11];
+        mem.read(seg, off.wrapping_add(1), &mut pattern);
+        let mut from = mem.r16(seg, off.wrapping_add(12)) as usize;
+        while let Some((slot, name, size)) = self.volume.next_from(from) {
+            from = slot + 1;
+            if !files::matches(&pattern, name) {
+                continue;
+            }
+            mem.w16(seg, off.wrapping_add(12), from as u16);
+            mem.w8(seg, off.wrapping_add(21), 0x20); // archive: every file is an ordinary one
+            let (time, date) = self.volume.stamp(slot);
+            mem.w16(seg, off.wrapping_add(22), time);
+            mem.w16(seg, off.wrapping_add(24), date);
+            mem.w16(seg, off.wrapping_add(26), size as u16);
+            mem.w16(seg, off.wrapping_add(28), (size >> 16) as u16);
+            let mut entry = [0u8; 13];
+            entry[..name.len()].copy_from_slice(name.as_bytes());
+            mem.write(seg, off.wrapping_add(30), &entry);
+            return Ok(());
+        }
+        mem.w16(seg, off.wrapping_add(12), from as u16);
+        Err(files::ERR_NO_MORE_FILES)
+    }
+
     pub(crate) fn int21(&mut self, r: &mut Regs, mem: &mut Mem, con: &mut dyn CharDevice) -> Outcome {
         let result: DosResult = match r.ah() {
             0x00 => return Outcome::Exit(0),
@@ -264,13 +376,7 @@ impl Dos {
             }
             0x3C => self.open(r, mem, true),
             0x3D => self.open(r, mem, false),
-            0x3E => match self.handles.get_mut(r.bx as usize) {
-                Some(handle @ Some(_)) => {
-                    *handle = None;
-                    Ok(())
-                }
-                _ => Err(files::ERR_BAD_HANDLE),
-            },
+            0x3E => self.detach(r.bx),
             0x3F => match self.read(r, mem, con) {
                 Some(result) => result,
                 None => return Outcome::WaitInput,
@@ -296,6 +402,8 @@ impl Dos {
                     Handle::File { .. } => 0x0002, // file on drive C:
                 })
                 .map(|info| r.dx = info),
+            0x45 => self.duplicate(r, false),
+            0x46 => self.duplicate(r, true),
             0x48 => match arena::alloc(mem, r.bx, self.psp) {
                 Ok(seg) => {
                     r.ax = seg;
@@ -311,6 +419,9 @@ impl Dos {
                 r.bx = max;
                 e
             }),
+            0x57 => self.file_stamp(r),
+            0x4E => self.find_first(r, mem),
+            0x4F => self.find_next(r, mem),
             0x4C => return Outcome::Exit(r.al()),
             0x51 | 0x62 => {
                 r.bx = self.psp;

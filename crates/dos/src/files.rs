@@ -8,11 +8,18 @@ pub const ERR_PATH_NOT_FOUND: u16 = 3;
 pub const ERR_TOO_MANY_OPEN: u16 = 4;
 pub const ERR_ACCESS_DENIED: u16 = 5;
 pub const ERR_BAD_HANDLE: u16 = 6;
+pub const ERR_NO_MORE_FILES: u16 = 18;
+
+/// A DOS file time and date, as INT 21h/57h exchanges them.
+pub(crate) type Stamp = (u16, u16);
+/// What a file is stamped with until a program says otherwise: the machine
+/// has no calendar, so 00:00:00 on 1980-01-01, the first date DOS can name.
+const EPOCH: Stamp = (0, 0x0021);
 
 /// A capsule's drive C:. One flat root directory held in memory; names are
 /// stored upper-case, as DOS presents them.
 pub struct Volume {
-    files: Vec<Option<(String, Vec<u8>)>>,
+    files: Vec<Option<(String, Vec<u8>, Stamp)>>,
     capacity: usize,
 }
 
@@ -25,14 +32,14 @@ impl Volume {
 
     /// Bytes programs can still write before the disk is full.
     pub fn free(&self) -> usize {
-        let used: usize = self.files.iter().flatten().map(|(_, data)| data.len()).sum();
+        let used: usize = self.files.iter().flatten().map(|(_, data, _)| data.len()).sum();
         self.capacity.saturating_sub(used)
     }
 
     /// Add or replace a file, regardless of capacity: this is the operator
     /// stocking the disk, not a program writing to it. Returns its slot.
     pub fn put(&mut self, name: &str, data: Vec<u8>) -> usize {
-        let entry = Some((name.to_ascii_uppercase(), data));
+        let entry = Some((name.to_ascii_uppercase(), data, EPOCH));
         match self.slot(name) {
             Some(slot) => {
                 self.files[slot] = entry;
@@ -50,11 +57,26 @@ impl Volume {
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.files.iter().flatten().map(|(name, _)| name.as_str())
+        self.files.iter().flatten().map(|(name, ..)| name.as_str())
+    }
+
+    /// The first file at or after slot `from`: its slot, name and size.
+    pub(crate) fn next_from(&self, from: usize) -> Option<(usize, &str, usize)> {
+        (from..self.files.len()).find_map(|i| self.files[i].as_ref().map(|(n, d, _)| (i, n.as_str(), d.len())))
+    }
+
+    pub(crate) fn stamp(&self, slot: usize) -> Stamp {
+        self.files[slot].as_ref().map_or(EPOCH, |f| f.2)
+    }
+
+    pub(crate) fn set_stamp(&mut self, slot: usize, stamp: Stamp) {
+        if let Some(f) = self.files[slot].as_mut() {
+            f.2 = stamp;
+        }
     }
 
     pub(crate) fn slot(&self, name: &str) -> Option<usize> {
-        self.files.iter().position(|f| matches!(f, Some((n, _)) if n.eq_ignore_ascii_case(name)))
+        self.files.iter().position(|f| matches!(f, Some((n, ..)) if n.eq_ignore_ascii_case(name)))
     }
 
     pub(crate) fn remove(&mut self, slot: usize) {
@@ -62,12 +84,12 @@ impl Volume {
     }
 
     pub(crate) fn data(&self, slot: usize) -> &[u8] {
-        self.files[slot].as_ref().map_or(&[], |(_, data)| data)
+        self.files[slot].as_ref().map_or(&[], |(_, data, _)| data)
     }
 
     /// The contents of an open file; `None` once it has been deleted.
     pub(crate) fn data_mut(&mut self, slot: usize) -> Option<&mut Vec<u8>> {
-        self.files[slot].as_mut().map(|(_, data)| data)
+        self.files[slot].as_mut().map(|(_, data, _)| data)
     }
 }
 
@@ -114,3 +136,29 @@ pub(crate) enum Handle {
 
 pub(crate) const MODE_READ: u8 = 0;
 pub(crate) const MODE_WRITE: u8 = 1;
+
+/// A name as the 11 bytes of an FCB: eight of name, three of extension, space
+/// padded, upper case. `*` fills the rest of its field with `?`.
+pub(crate) fn fcb_name(name: &str) -> [u8; 11] {
+    let mut out = [b' '; 11];
+    let (stem, ext) = name.split_once('.').unwrap_or((name, ""));
+    for (field, text, width) in [(0, stem, 8), (8, ext, 3)] {
+        let mut n = 0;
+        for b in text.bytes().map(|b| b.to_ascii_uppercase()) {
+            if b == b'*' {
+                out[field + n..field + width].fill(b'?');
+                n = width;
+            } else if n < width {
+                out[field + n] = b;
+                n += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Whether `name` matches an FCB-form wildcard `pattern`.
+pub(crate) fn matches(pattern: &[u8; 11], name: &str) -> bool {
+    let name = fcb_name(name);
+    pattern.iter().zip(name).all(|(&p, n)| p == b'?' || p == n)
+}
