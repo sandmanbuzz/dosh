@@ -3,11 +3,21 @@
 //!
 //! A real-mode program reaches DOS and the BIOS with `INT n`, and is free to
 //! read, replace and chain the vectors. So the vectors are real: each one
-//! initially points at a two-byte gate in the ROM segment,
+//! initially points at a four-byte gate in the ROM segment,
 //!
 //! ```text
-//! F000:(n*2)   HLT     ; leaves the guest; the capsule performs service n
+//! F000:(n*4)   HLT     ; leaves the guest; the capsule performs service n
 //!              IRET    ; resumes the caller, natively
+//!              (two bytes unused)
+//! ```
+//!
+//! The timer's gate is the exception. Its default handler is BIOS code that
+//! calls INT 1Ch, so a program's own tick hook runs on every tick:
+//!
+//! ```text
+//! F000:0020    HLT     ; service 08h: nothing to do, the clock is kept already
+//!              INT 1Ch ; the user timer hook, through its vector
+//!              IRET
 //! ```
 //!
 //! `HLT` is a one-byte instruction that every hardware-virtualization
@@ -22,16 +32,26 @@ pub const CONVENTIONAL_TOP: u16 = 0xA000;
 
 const HLT: u8 = 0xF4;
 const IRET: u8 = 0xCF;
+const INT: u8 = 0xCD;
+/// Bytes per gate. Four, so the timer's gate can call INT 1Ch.
+const GATE: u16 = 4;
 /// Segment of the BIOS data area.
 pub const BDA: u16 = 0x0040;
 
 pub fn install(mem: &mut Mem) {
     for vector in 0..256u16 {
-        mem.w16(0, vector * 4, vector * 2);
+        let gate = vector * GATE;
+        mem.w16(0, vector * 4, gate);
         mem.w16(0, vector * 4 + 2, GATE_SEG);
-        mem.w8(GATE_SEG, vector * 2, HLT);
-        mem.w8(GATE_SEG, vector * 2 + 1, IRET);
+        mem.w8(GATE_SEG, gate, HLT);
+        mem.w8(GATE_SEG, gate + 1, IRET);
     }
+    // The timer's default handler: the tick is already counted, so the
+    // service does nothing, then the user timer hook at INT 1Ch runs.
+    let timer = TIMER_VECTOR * GATE;
+    mem.w8(GATE_SEG, timer + 1, INT);
+    mem.w8(GATE_SEG, timer + 2, 0x1C);
+    mem.w8(GATE_SEG, timer + 3, IRET);
     mem.w16(BDA, 0x6C, 0); // tick count, set by the supervisor's clock
     mem.w16(BDA, 0x6E, 0);
     mem.w8(BDA, 0x70, 0); // midnight flag
@@ -70,7 +90,10 @@ pub fn set_midnight(mem: &mut Mem) {
     mem.w8(BDA, 0x70, 1);
 }
 
+/// The clock tick, IRQ 0 on a PC.
+pub const TIMER_VECTOR: u16 = 0x08;
+
 /// If `cs:ip` is the `HLT` of a service gate, the vector it serves.
 pub fn gate_vector(cs: u16, ip: u16) -> Option<u8> {
-    (cs == GATE_SEG && ip < 512 && ip.is_multiple_of(2)).then_some((ip / 2) as u8)
+    (cs == GATE_SEG && ip < 256 * GATE && ip.is_multiple_of(GATE)).then_some((ip / GATE) as u8)
 }

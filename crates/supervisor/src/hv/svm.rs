@@ -394,10 +394,11 @@ impl Vm {
             },
             EXIT_NPF => Exit::MemoryFault { address: info2 },
             EXIT_SHUTDOWN => Exit::Shutdown,
-            EXIT_INTR | EXIT_NMI => {
+            EXIT_INTR => {
                 timer::accept();
                 Exit::Preempted
             }
+            EXIT_NMI => Exit::Nmi,
             // The processor refused the guest state we built: our bug.
             EXIT_INVALID => panic!("VMRUN rejected the guest state of vm {}", self.id),
             code => Exit::Forbidden { code, info: info1 },

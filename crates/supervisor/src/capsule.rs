@@ -208,6 +208,7 @@ impl Capsule {
             Exit::MemoryFault { address } => self.fault_here(format!("access to unmapped memory at {address:#x}")),
             Exit::Shutdown => self.fault_here("triple fault".into()),
             Exit::Preempted => self.preemptions += 1,
+            Exit::Nmi => {}
             Exit::Forbidden { code, info } => {
                 self.fault_here(format!("forbidden operation (exit code {code:#x}, info {info:#x})"))
             }

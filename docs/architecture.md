@@ -35,8 +35,17 @@ the UEFI runtime service that exists for that purpose.
 
 **Takeover** (`platform/`). The supervisor installs its own identity-mapped
 page tables, GDT, TSS and IDT, silences the interrupt controllers the
-firmware left running, starts its own clock (a 100 Hz local-APIC timer,
-calibrated against the PIT), and switches to its own stack.
+firmware left running, starts its own clock (a local-APIC timer at a nominal
+100 Hz), and switches to its own stack.
+
+The clock has two roles, kept distinct. The scheduler needs only a regular
+tick, and gets one either way. The guest's timebase needs the tick rate to
+be known: the APIC timer is calibrated against the PIT, and the boot log
+reports `timer hz=100 calibrated=yes|no`. When calibration fails the
+supervisor falls back to an arbitrary period. Guests are still preempted,
+but their clock rate is then unknown. Guest interrupts follow the BIOS count,
+which is derived from that tick, so their rate is only as good as the
+calibration.
 
 **Supervision** (`main.rs`). Hardware virtualization is enabled, one capsule
 is built per manifest line, and the scheduler runs them round-robin until
@@ -124,13 +133,17 @@ later.
 
 A DOS program reaches DOS and the BIOS with `INT n`, and is free to read,
 replace and chain interrupt vectors. So DOSH does not intercept `INT`. The
-vectors are real. Each initially points at a two-byte gate in the guest's
+vectors are real. Each initially points at a four-byte gate in the guest's
 ROM segment:
 
 ```
-F000:(n*2)   HLT     ; exit to the supervisor, which performs service n
+F000:(n*4)   HLT     ; exit to the supervisor, which performs service n
              IRET    ; return to the caller, natively
 ```
+
+The timer's gate, INT 08h, is BIOS code rather than a plain gate: after its
+service it calls INT 1Ch through the vector, so a program's own tick hook
+runs on every tick, as on a PC.
 
 The processor delivers the interrupt itself, pushing a normal interrupt
 frame. The capsule recognises the gate by its address, performs the service
@@ -145,6 +158,14 @@ A call that needs console input that has not arrived leaves the guest
 parked on the gate with its state untouched. The capsule makes the same
 call again when input appears. No supervisor stack is ever held on behalf
 of a blocked guest.
+
+While a call is parked, the guest's BIOS clock keeps advancing and one
+pending INT 08h is recorded, but the guest does not execute, so its timer
+handlers do not run until the call completes. Ticks that arrive during the
+wait coalesce into that one pending INT 08h. This is an initial limitation,
+not a design: a PC would run timer handlers during a wait. Lifting it needs
+the blocked service to re-enter the guest, which the virtual interval timer
+work will decide.
 
 ## DOS personality (`crates/dos`)
 

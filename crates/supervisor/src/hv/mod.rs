@@ -73,9 +73,13 @@ pub enum Exit {
     MemoryFault { address: u64 },
     /// The guest faulted its way into a shutdown (a triple fault).
     Shutdown,
-    /// The supervisor's clock took the processor back. The guest did nothing
-    /// and can simply be run again.
+    /// An external interrupt, the supervisor's clock, took the processor
+    /// back. The guest did nothing and can simply be run again. The guest
+    /// itself sees no interrupt: its own timer is driven by its BIOS clock.
     Preempted,
+    /// A non-maskable interrupt reached the supervisor. It is the host's
+    /// business: the guest is not interrupted, and can be run again.
+    Nmi,
     /// The guest attempted something no capsule may do, identified by the
     /// backend's raw exit code.
     Forbidden { code: u64, info: u64 },

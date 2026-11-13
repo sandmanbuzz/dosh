@@ -4,6 +4,12 @@
 //! guest can keep the processor. While a guest runs, the tick forces it out
 //! (see `hv`); the supervisor itself keeps interrupts off and takes pending
 //! ticks only at the two points below, [`accept`] and [`idle`].
+//!
+//! Two things are separate here. The scheduler needs only a tick that
+//! arrives regularly. A guest's timebase needs that tick to be 100 Hz, which
+//! holds only when the local APIC timer was calibrated against the PIT. An
+//! uncalibrated tick still preempts guests, but its rate is a guess, and the
+//! boot log says so (`timer calibrated=no`).
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -52,11 +58,15 @@ fn apic_read(reg: u32) -> u32 {
     }
 }
 
+/// Local-APIC timer counts per tick when the PIT did not answer. Nothing
+/// is known about the real rate, so this only keeps the scheduler running.
+const FALLBACK: u32 = 1_000_000;
+
 /// Local-APIC timer counts in one tick, measured against the PIT, whose
-/// frequency is the one fixed point of PC timekeeping.
-fn calibrate() -> u32 {
+/// frequency is the one fixed point of PC timekeeping. `None` if the PIT
+/// did not answer.
+fn calibrate() -> Option<u32> {
     const PIT_HZ: u32 = 1_193_182;
-    const FALLBACK: u32 = 1_000_000;
     let count = (PIT_HZ / TICK_HZ) as u16;
     // Channel 2, gated on, speaker off: counts down once and raises OUT2.
     outb(0x61, (inb(0x61) & !0x02) | 0x01);
@@ -66,10 +76,10 @@ fn calibrate() -> u32 {
     apic_write(INITIAL_COUNT, u32::MAX);
     for _ in 0..50_000_000u32 {
         if inb(0x61) & 0x20 != 0 {
-            return (u32::MAX - apic_read(CURRENT_COUNT)).max(1000);
+            return Some((u32::MAX - apic_read(CURRENT_COUNT)).max(1000));
         }
     }
-    FALLBACK // no PIT answered; any period still preempts
+    None
 }
 
 /// Silence every interrupt source the firmware left behind, then start the
@@ -85,9 +95,10 @@ pub fn start() {
     apic_write(SPURIOUS, 0x100 | SPURIOUS_VECTOR as u32);
     apic_write(DIVIDE, 0x3); // divide by 16
     apic_write(LVT_TIMER, 1 << 16); // masked while calibrating
-    let period = calibrate();
+    let measured = calibrate();
+    crate::log!("timer hz={TICK_HZ} calibrated={}", measured.is_some());
     apic_write(LVT_TIMER, TICK_VECTOR as u32 | 1 << 17); // periodic
-    apic_write(INITIAL_COUNT, period);
+    apic_write(INITIAL_COUNT, measured.unwrap_or(FALLBACK));
 }
 
 pub fn ticks() -> u64 {

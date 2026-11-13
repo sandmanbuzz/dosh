@@ -377,3 +377,20 @@ fn other_bios_time_services_fault() {
     m.regs.ax = 0x0200;
     assert_eq!(m.raise(0x1A).0, Outcome::Fault(Fault::Unimplemented { vector: 0x1A, ah: 2, al: 0 }));
 }
+
+#[test]
+fn timer_gate_calls_the_user_hook_at_int_1ch() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    let mem = m.mem();
+    // HLT (service 08h), then INT 1Ch, then IRET.
+    let stub = [
+        mem.r8(firmware::GATE_SEG, 0x20),
+        mem.r8(firmware::GATE_SEG, 0x21),
+        mem.r8(firmware::GATE_SEG, 0x22),
+        mem.r8(firmware::GATE_SEG, 0x23),
+    ];
+    assert_eq!(stub, [0xF4, 0xCD, 0x1C, 0xCF]);
+    assert_eq!(firmware::gate_vector(firmware::GATE_SEG, 0x20), Some(0x08));
+    assert_eq!(firmware::gate_vector(firmware::GATE_SEG, 0x70), Some(0x1C));
+    assert_eq!(firmware::gate_vector(firmware::GATE_SEG, 0x21), None);
+}
