@@ -107,6 +107,9 @@ contract.
   and the full COM1 log.
 - A supervisor panic or unexpected processor trap is logged
   (`panic at=... message=...`, `trap vector=... rip=...`) before power-off.
+- A non-maskable interrupt is survived, not fatal: the supervisor counts
+  it and, if any arrived, logs `nmi taken=N` before `shutdown`. The harness
+  can raise one with `doshlab.run(..., nmi=True)`.
 - A run that never powers off times out; the log so far is in the test
   failure. The usual cause is a capsule waiting for input that was not
   sent.

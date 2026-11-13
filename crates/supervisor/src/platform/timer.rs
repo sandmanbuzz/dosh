@@ -26,6 +26,7 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 const EOI: u32 = 0x0B0;
 const SPURIOUS: u32 = 0x0F0;
 const LVT_TIMER: u32 = 0x320;
+const LVT_LINT1: u32 = 0x360;
 const INITIAL_COUNT: u32 = 0x380;
 const CURRENT_COUNT: u32 = 0x390;
 const DIVIDE: u32 = 0x3E0;
@@ -93,6 +94,9 @@ pub fn start() {
     // SAFETY: the APIC base MSR exists; setting bit 11 enables the APIC.
     unsafe { wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | 1 << 11) };
     apic_write(SPURIOUS, 0x100 | SPURIOUS_VECTOR as u32);
+    // LINT1 is the PC's NMI pin: deliver it as an NMI, unmasked, so the
+    // handler in `tables` is reachable rather than assumed.
+    apic_write(LVT_LINT1, 0x400);
     apic_write(DIVIDE, 0x3); // divide by 16
     apic_write(LVT_TIMER, 1 << 16); // masked while calibrating
     let measured = calibrate();

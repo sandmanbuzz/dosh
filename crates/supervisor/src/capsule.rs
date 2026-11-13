@@ -14,7 +14,7 @@ use crate::boot::CapsuleSpec;
 use crate::device::Console;
 use crate::hv::{self, Cpu, Exit, Segment};
 use crate::log;
-use crate::platform::timer;
+use crate::platform::{self, timer};
 use crate::present::Endpoint;
 
 /// Space on a capsule's drive C: beyond the files it was provisioned with.
@@ -208,7 +208,7 @@ impl Capsule {
             Exit::MemoryFault { address } => self.fault_here(format!("access to unmapped memory at {address:#x}")),
             Exit::Shutdown => self.fault_here("triple fault".into()),
             Exit::Preempted => self.preemptions += 1,
-            Exit::Nmi => {}
+            Exit::Nmi => log!("capsule id={} event=nmi total={}", self.id, platform::nmis()),
             Exit::Forbidden { code, info } => {
                 self.fault_here(format!("forbidden operation (exit code {code:#x}, info {info:#x})"))
             }

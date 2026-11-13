@@ -1,11 +1,14 @@
 //! The supervisor's descriptor tables, and what happens when the processor
 //! raises something through them.
 //!
-//! The supervisor expects exactly one interrupt, its clock tick, and no
-//! exceptions. Anything else is reported and the machine powered off.
+//! The supervisor expects its clock tick, and no exceptions. A non-maskable
+//! interrupt is the one other thing it survives: it is counted and the
+//! interrupted code resumes. Anything else is reported and the machine
+//! powered off.
 
 use alloc::boxed::Box;
 use core::arch::{asm, global_asm};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{timer, Pages};
 
@@ -13,6 +16,14 @@ const CODE: u16 = 0x08;
 const DATA: u16 = 0x10;
 const TSS: u16 = 0x18;
 const DOUBLE_FAULT: usize = 8;
+const NMI: u64 = 2;
+
+static NMIS: AtomicU64 = AtomicU64::new(0);
+
+/// How many non-maskable interrupts the supervisor has taken.
+pub fn nmis() -> u64 {
+    NMIS.load(Ordering::Relaxed)
+}
 
 #[repr(C, packed)]
 struct TablePointer {
@@ -118,6 +129,11 @@ extern "sysv64" fn dosh_trap(frame: &TrapFrame) {
     match frame.vector {
         timer::TICK_VECTOR => return timer::on_tick(),
         timer::SPURIOUS_VECTOR => return,
+        // Counted, not logged: this may have interrupted the logger.
+        NMI => {
+            NMIS.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         _ => {}
     }
     let cr2: u64;

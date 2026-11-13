@@ -122,6 +122,22 @@ def build_disk(image: Path, manifest_text: str, files: dict[str, bytes]) -> None
         mtools("mcopy", str(path), f"::/DOSH/C/{path.name}")
 
 
+def read_text(path: Path) -> str:
+    return path.read_text(errors="replace") if path.exists() else ""
+
+
+def inject_nmi(monitor: Path) -> None:
+    """Raise a non-maskable interrupt through QEMU's monitor."""
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.connect(str(monitor))
+        sock.sendall(b"nmi\n")
+        sock.settimeout(1)
+        try:
+            sock.recv(4096)
+        except TimeoutError:
+            pass
+
+
 def run(
     runs: list[str],
     *,
@@ -131,6 +147,7 @@ def run(
     cpu: str | None = None,
     manifest: str | None = None,
     attach: bool = False,
+    nmi: bool = False,
     timeout: float = 120,
     keep: Path | None = None,
 ) -> Result:
@@ -142,7 +159,8 @@ def run(
     CPU model; `manifest` replaces the generated boot manifest verbatim.
     `attach` connects capsule 0's console to this process's own terminal
     instead of capturing it (firmware output included, as on a real line).
-    `keep` preserves the run directory there for inspection.
+    `nmi` injects one non-maskable interrupt once the first capsule has
+    started. `keep` preserves the run directory there for inspection.
     """
     files = dict(files or {})
     for line in runs:
@@ -169,6 +187,7 @@ def run(
             "-drive", f"if=none,id=esp,format=raw,file={workdir / 'esp.img'}",
             "-device", "virtio-blk-pci,drive=esp",
             "-chardev", f"file,id=log,path={workdir / 'dosh.log'}", "-serial", "chardev:log",
+            "-monitor", f"unix:{workdir / 'monitor.sock'},server,nowait",
         ]  # fmt: skip
         for i, (_, theirs) in enumerate(pairs):
             backend = "stdio,signal=off" if attach and i == 0 else f"socket,fd={theirs.fileno()}"
@@ -196,11 +215,16 @@ def run(
         timed_out = False
         while open_socks:
             remaining = timeout - (time.monotonic() - started)
-            ready, _, _ = select.select(list(open_socks), [], [], max(remaining, 0))
+            ready, _, _ = select.select(list(open_socks), [], [], min(max(remaining, 0), 0.05))
+            if nmi and "event=start" in read_text(workdir / "dosh.log"):
+                inject_nmi(workdir / "monitor.sock")
+                nmi = False
             if not ready:
-                timed_out = True
-                qemu.kill()
-                break
+                if remaining <= 0:
+                    timed_out = True
+                    qemu.kill()
+                    break
+                continue
             for sock in ready:
                 data = sock.recv(65536)
                 if data:
@@ -213,8 +237,7 @@ def run(
         for sock in ours:
             sock.close()
 
-        log_file = workdir / "dosh.log"
-        log = log_file.read_text(errors="replace") if log_file.exists() else ""
+        log = read_text(workdir / "dosh.log")
         if qemu_output.strip():
             log += f"\n--- qemu ---\n{qemu_output}"
         if keep:

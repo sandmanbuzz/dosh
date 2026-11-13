@@ -103,6 +103,9 @@ fn supervise(provision: boot::Provision) -> ! {
     }
 
     let exited = capsules.iter().filter(|c| c.exit_code().is_some()).count();
+    if platform::nmis() > 0 {
+        log!("nmi taken={}", platform::nmis());
+    }
     log!("shutdown capsules={} exited={} faulted={}", capsules.len(), exited, capsules.len() - exited);
     platform::power_off()
 }

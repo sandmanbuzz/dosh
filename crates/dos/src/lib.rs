@@ -158,8 +158,8 @@ impl Dos {
     /// Advance the BIOS clock to `hz100`, the supervisor's tick count since
     /// the supervisor booted, in hundredths of a second. A capsule started
     /// later therefore sees an offset count, not zero. The supervisor calls
-    /// this before each step of
-    /// the guest, so the guest reads the time from memory and from `INT 1Ah`.
+    /// this before each step of the guest, so the guest reads the time from
+    /// memory and from `INT 1Ah`.
     /// Returns whether the BIOS count has advanced since the last call: that
     /// is one `INT 08h` for the guest, however many ticks were missed.
     pub fn set_clock(&mut self, mem: &mut Mem, hz100: u64) -> bool {

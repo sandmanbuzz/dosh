@@ -6,6 +6,8 @@ mod tables;
 pub mod timer;
 pub mod uart;
 
+pub use tables::nmis;
+
 use alloc::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use core::arch::asm;
 use core::ptr::NonNull;

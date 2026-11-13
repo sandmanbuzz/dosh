@@ -66,6 +66,16 @@ def test_bios_tick_calls_the_user_timer_hook(dosh):
     assert exited(result) == 0
 
 
+def test_a_host_nmi_is_survived_and_the_guest_runs_on(dosh):
+    # An NMI injected while a capsule runs reaches the supervisor, which counts
+    # it and resumes; it must neither power the machine off nor reach the guest.
+    result = dosh("RATE.COM", nmi=True)
+    assert result.consoles[0] == b"RATE OK\r\n"
+    assert exited(result) == 0
+    assert int(result.one("nmi")["taken"]) >= 1, result.log
+    assert not result.find("trap"), result.log
+
+
 def test_guest_clock_interrupts_at_the_bios_rate(dosh):
     # INT 08h delivery follows elapsed BIOS time: 16 to 19 ticks in 18 ticks.
     result = dosh("RATE.COM")
