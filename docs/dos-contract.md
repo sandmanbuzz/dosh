@@ -111,7 +111,7 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 | `INT 20h` | Terminate. |
 | `INT 29h` | Fast console output. |
 | `INT 00h`–`07h` | Processor exceptions. Unless the program has installed its own handler, the capsule faults. |
-| `INT 08h` | Clock tick. Its default service keeps the BIOS clock and calls `INT 1Ch`. Not delivered while a call waits for console input: the tick is held and delivered once the call completes. |
+| `INT 08h` | Clock tick. Its default service does nothing and resumes; the supervisor keeps the BIOS clock, and the gate's stub then calls `INT 1Ch`. Not delivered while a call waits for console input: the tick is held and delivered once the call completes. |
 | `INT 1Ch` | User timer hook. Default does nothing. |
 
 ## Drive C:

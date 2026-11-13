@@ -68,7 +68,7 @@ processor has. It exports:
   read and edit between runs.
 - `Vm::run() -> Exit` — execute guest instructions on the processor until
   the guest needs the supervisor: `Halt`, `Io`, `MemoryFault`, `Shutdown`,
-  `Preempted`, `Forbidden`.
+  `Preempted`, `Nmi`, `Forbidden`.
 
 The one backend is AMD SVM (`hv/svm.rs`). A guest is confined three ways:
 

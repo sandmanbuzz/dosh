@@ -20,7 +20,7 @@ use crate::present::Endpoint;
 /// Space on a capsule's drive C: beyond the files it was provisioned with.
 const DISK_ROOM: usize = 4 << 20;
 /// The clock tick, delivered to the guest as the PC's IRQ 0: INT 08h.
-const TICK_VECTOR: u8 = 0x08;
+const TICK_VECTOR: u8 = firmware::TIMER_VECTOR as u8;
 /// The processor's interrupt-enable flag.
 const FLAG_IF: u64 = 0x200;
 

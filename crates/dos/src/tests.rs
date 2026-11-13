@@ -372,6 +372,52 @@ fn bios_tick_advances_at_the_bios_rate_and_wraps_at_midnight() {
 }
 
 #[test]
+fn bios_clock_does_not_advance_on_an_unchanged_count() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    assert!(m.dos.set_clock(&mut Mem::new(&mut m.ram), 1000));
+    assert!(!m.dos.set_clock(&mut Mem::new(&mut m.ram), 1000));
+    // 1001 is still 182 whole BIOS ticks.
+    assert!(!m.dos.set_clock(&mut Mem::new(&mut m.ram), 1001));
+}
+
+#[test]
+fn bios_clock_wraps_at_each_midnight_and_sets_the_flag_once() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    // The argument is hundredths of a second. The count wraps at the first
+    // hundredth whose BIOS ticks reach one day's worth (1573040), which is
+    // 8_639_986; the next wrap, a BIOS day later, is 17_279_971.
+    const MIDNIGHT: u64 = 8_639_986;
+    const NEXT_MIDNIGHT: u64 = 17_279_971;
+    let read = |m: &mut Machine| {
+        m.regs.ax = 0x0000;
+        let (outcome, _) = m.raise(0x1A);
+        assert_eq!(outcome, Outcome::Resume);
+        (((m.regs.cx as u32) << 16) | m.regs.dx as u32, m.regs.al())
+    };
+
+    // Just before midnight the count is near a day's worth of BIOS ticks and
+    // the flag is clear.
+    m.dos.set_clock(&mut Mem::new(&mut m.ram), MIDNIGHT - 1);
+    let (before, al) = read(&mut m);
+    assert_eq!(al, 0);
+    assert!(before > 1_500_000, "count before midnight is {before}");
+
+    // Just after midnight the count has wrapped and the flag is set once.
+    m.dos.set_clock(&mut Mem::new(&mut m.ram), MIDNIGHT);
+    let (after, al) = read(&mut m);
+    assert_eq!(al, 1);
+    assert!(after < 10, "count after midnight is {after}");
+    assert_eq!(read(&mut m).1, 0);
+
+    // The next midnight wraps and sets the flag again.
+    m.dos.set_clock(&mut Mem::new(&mut m.ram), NEXT_MIDNIGHT - 1);
+    assert_eq!(read(&mut m).1, 0);
+    m.dos.set_clock(&mut Mem::new(&mut m.ram), NEXT_MIDNIGHT);
+    assert_eq!(read(&mut m).1, 1);
+    assert_eq!(read(&mut m).1, 0);
+}
+
+#[test]
 fn other_bios_time_services_fault() {
     let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
     m.regs.ax = 0x0200;
@@ -379,7 +425,9 @@ fn other_bios_time_services_fault() {
 }
 
 #[test]
-fn timer_gate_calls_the_user_hook_at_int_1ch() {
+fn timer_gate_stub_targets_int_1ch() {
+    // The chain's behaviour (INT 08h resumes, the stub calls INT 1Ch) is
+    // covered by the acceptance test `test_bios_tick_calls_the_user_timer_hook`.
     let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
     let mem = m.mem();
     // HLT (service 08h), then INT 1Ch, then IRET.
