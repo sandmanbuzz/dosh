@@ -38,20 +38,38 @@ it should arrive.
 
 Public domain under [the Unlicense](LICENSE): no rights reserved. This is not CC0.
 
-## Try it
+## Try it without installing anything on real hardware
 
-The only host requirement is `podman`. Everything else lives in the lab
-container, which is built on first use.
+DOSH runs on a virtual machine. QEMU, the UEFI firmware and every build tool
+live in a container, so you don't install them on your system and you don't
+need a spare computer. Everything DOSH writes stays inside this checkout,
+plus one container image.
+
+### What you need
+
+- `git`
+- `podman` (rootless is fine)
+- About 3 GB of disk for the container image and build caches.
+- Optional, for guests to run on the real processor: an AMD x86-64 host
+  with SVM and nested virtualization enabled, and `/dev/kvm` readable and
+  writable by you. Without it DOSH runs on QEMU's software processor
+  instead. Everything still works, and tests that need KVM are reported as
+  skipped with the reason.
+
+This has been built and tested on Linux with an AMD host. Other hosts are
+untested.
+
+### For users: run a DOS program in five minutes
 
 ```sh
-./lab make test                       # build everything, run every test
-./lab tools/doshlab.py HELLO.COM      # boot DOSH, run one program, show what happened
-./lab tools/doshlab.py "ARGS.COM one two" HELLOMZ.EXE     # two capsules
-./lab tools/doshlab.py --attach ASK.COM                   # sit at a capsule's console
+git clone <this repository> dosh && cd dosh
+./lab make guests                     # first run builds the lab image; allow a few minutes
+./lab tools/doshlab.py HELLO.COM </dev/null
 ```
 
+Expected result:
+
 ```
-$ ./lab tools/doshlab.py HELLO.COM
 --- capsule 0 console ---
 Hello from DOS!
 
@@ -65,11 +83,74 @@ capsule id=0 event=exit code=0 vmexits=2 preempted=0 stray_io=0
 shutdown capsules=1 exited=1 faulted=0
 ```
 
-With `/dev/kvm` and nested virtualization on an AMD host, guests execute on
-the physical processor. Without it the lab falls back to QEMU's software
-processor, which emulates SVM: the same supervisor code runs, but nothing is
-proven about real hardware. Tests run on both paths and say which.
-[docs/lab.md](docs/lab.md) has the details.
+The first line of the log says which path ran: `kvm` means guests executed
+on your processor, and `tcg` means the software processor.
+
+Other things to try:
+
+```sh
+./lab tools/doshlab.py "ARGS.COM one two" HELLOMZ.EXE   # two capsules, a .COM and a .EXE
+./lab tools/doshlab.py --attach UPPER.COM               # a filter; type lines, then Ctrl-Z and Enter
+./lab tools/doshlab.py --attach ASK.COM                 # sit at a capsule's console (needs a terminal)
+./lab tools/doshlab.py --accel tcg HELLO.COM </dev/null # force the software processor
+```
+
+Run `./lab tools/doshlab.py --help` for every option. The corpus of programs
+is in [guests/](guests/) and what each one proves is in the
+[acceptance tests](tests/test_acceptance.py).
+
+#### Running your own program
+
+After `./lab make guests`, copy a `.COM` or `.EXE` into `build/guests/` and
+name it on the command line. Only programs in that directory can be run from
+the command line. For anything else, call `run()` from `tools/doshlab.py`
+in Python. Its `files=` argument puts extra files on drive C:.
+
+What DOSH can run is limited to the [DOS contract](docs/dos-contract.md).
+If a program needs something outside it, the log says which call:
+
+```
+capsule id=0 event=fault ... reason="unimplemented service INT 21h AH=59h AL=02h"
+```
+
+### Notes on running it
+
+- **Standard input.** When the runner isn't attached to a terminal, it
+  reads all of standard input before it starts, so always redirect it:
+  `</dev/null` for a run with no input. Piped input goes to the first capsule
+  once its session opens.
+- **The first run is slow.** Building the lab image takes several minutes.
+  Later runs start in seconds.
+- **No disk changes.** A run's boot disk is a temporary directory, deleted
+  when the run ends. `--keep DIR` keeps it for inspection.
+
+### For developers: the full gate
+
+```sh
+./lab                                  # a shell inside the lab
+./lab make test                        # build, fmt, clippy, unit tests, all acceptance tests
+./lab make check                       # just the static checks and the DOS unit tests
+./lab python3 -m pytest tests -k NAME  # one acceptance test
+```
+
+Read [AGENTS.md](AGENTS.md) before you change anything. It covers how work is
+structured here, and [docs/lab.md](docs/lab.md) explains how the lab and the
+two execution paths work.
+
+### Cleaning up
+
+```sh
+./lab make clean          # removes target/ and build/ in this checkout
+rm -rf .lab               # removes the lab's caches
+podman rmi localhost/dosh-lab:<tag>   # optional: removes the lab image
+```
+
+`podman images | grep dosh-lab` lists the tags to remove.
+
+Without KVM the software processor emulates SVM. The supervisor code is the
+same, but nothing is proven about real hardware. Tests run on both paths and
+say which one they used.
+
 
 ## Layout
 
