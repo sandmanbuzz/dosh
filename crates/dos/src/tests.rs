@@ -701,3 +701,76 @@ fn dos_input_reads_extended_keys_as_zero_then_scan_code() {
     }
     assert_eq!(got, [0, 0x50, b'!']);
 }
+
+#[test]
+fn fcb_files_open_read_write_and_find() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"0123456789")], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    // A 36-byte FCB for A.TXT on the default drive.
+    let fcb = 0x200u16;
+    m.mem().write(ds, fcb, &[0]);
+    m.mem().write(ds, fcb + 1, b"A       TXT");
+    m.mem().write(ds, fcb + 12, &[0; 21]);
+    m.mem().w8(ds, fcb + 36, 0);
+    m.regs.dx = fcb;
+    assert!(m.call(0x0F00));
+    assert_eq!(m.regs.ax as u8, 0);
+    assert_eq!(m.mem().r16(ds, fcb + 0x0E), 0x80, "record size defaults to 128");
+    assert_eq!(m.mem().r16(ds, fcb + 0x10), 10, "file size");
+    // Two-byte records: sequential reads advance; a short last record is padded.
+    m.mem().w16(ds, fcb + 0x0E, 4);
+    m.regs.dx = 0x300; // DTA
+    m.regs.ax = 0x1A00;
+    assert!(m.call(0x1A00));
+    m.regs.dx = fcb;
+    let mut got = vec![];
+    for _ in 0..4 {
+        assert!(m.call(0x1400));
+        let mut buf = [0; 4];
+        m.mem().read(ds, 0x300, &mut buf);
+        got.push((m.regs.ax as u8, buf));
+    }
+    assert_eq!(got, [(0, *b"0123"), (0, *b"4567"), (3, *b"89\0\0"), (1, *b"89\0\0")]);
+    // Random read of record 1; with 64+ byte records only three bytes count.
+    m.mem().w16(ds, fcb + 0x0E, 2);
+    m.mem().write(ds, fcb + 0x21, &[1, 0, 0]);
+    assert!(m.call(0x2100));
+    assert_eq!((m.regs.ax as u8, m.mem().r8(ds, 0x300)), (0, b'2'));
+    m.mem().w16(ds, fcb + 0x0E, 0x80);
+    m.mem().write(ds, fcb + 0x21, &[0, 0, 0, 0xFF]);
+    m.mem().w16(ds, 0x300, 0);
+    assert!(m.call(0x2100)); // record 0 of 128 bytes: partial
+    assert_eq!(m.regs.ax as u8, 3);
+    // Create, write two records at random, close; the file is on C:.
+    m.mem().write(ds, fcb + 1, b"NEW     DAT");
+    assert!(m.call(0x1600));
+    m.mem().write(ds, 0x300, b"abcdefgh");
+    m.mem().w16(ds, fcb + 0x0E, 4);
+    m.mem().write(ds, fcb + 0x21, &[1, 0, 0, 0]);
+    assert!(m.call(0x2200));
+    assert_eq!(m.regs.ax as u8, 0);
+    assert_eq!(m.mem().r16(ds, fcb + 0x10), 8, "file size grows");
+    assert!(m.call(0x1000));
+    assert_eq!(m.dos.volume.get("NEW.DAT"), Some(&b"\0\0\0\0abcd"[..]));
+    // Find first / next with a wildcard.
+    m.mem().write(ds, fcb + 1, b"????????TXT");
+    assert!(m.call(0x1100));
+    assert_eq!(m.regs.ax as u8, 0);
+    assert_eq!(m.mem().r8(ds, 0x300), 3);
+    let mut name = [0; 11];
+    m.mem().read(ds, 0x301, &mut name);
+    assert_eq!(&name, b"A       TXT");
+    assert!(m.call(0x1200));
+    assert_eq!(m.regs.ax as u8, 0xFF, "no more");
+    // Rename NEW.DAT to OLD.DAT, then delete it.
+    m.mem().write(ds, fcb + 1, b"NEW     DAT");
+    m.mem().write(ds, fcb + 0x11, b"OLD     DAT");
+    assert!(m.call(0x1700));
+    assert_eq!(m.regs.ax as u8, 0);
+    assert!(m.dos.volume.get("NEW.DAT").is_none() && m.dos.volume.get("OLD.DAT").is_some());
+    m.mem().write(ds, fcb + 1, b"OLD     DAT");
+    assert!(m.call(0x1300));
+    assert!(m.dos.volume.get("OLD.DAT").is_none());
+    assert!(m.call(0x1300));
+    assert_eq!(m.regs.ax as u8, 0xFF);
+}

@@ -410,6 +410,48 @@ impl Dos {
                 r.set_al(if ready { 0xFF } else { 0 });
                 return Outcome::Resume;
             }
+            0x0D => return Outcome::Resume, // disk reset: nothing is buffered, writes reach the volume at once
+            0x0E => {
+                // Select disk. C: is the only drive and always current, so
+                // this changes nothing; the count is of drive letters in use.
+                r.set_al(3);
+                return Outcome::Resume;
+            }
+            0x0F | 0x16 => {
+                crate::fcb::open(r, mem, &mut self.volume, r.ah() == 0x16);
+                return Outcome::Resume;
+            }
+            0x10 => {
+                crate::fcb::close(r, mem, &self.volume);
+                return Outcome::Resume;
+            }
+            0x13 => {
+                crate::fcb::delete(r, mem, &mut self.volume);
+                return Outcome::Resume;
+            }
+            0x17 => {
+                crate::fcb::rename(r, mem, &mut self.volume);
+                return Outcome::Resume;
+            }
+            0x14 | 0x15 | 0x21 | 0x22 | 0x27 | 0x28 => {
+                use crate::fcb::Access;
+                let access = match r.ah() {
+                    0x14 | 0x15 => Access::Sequential,
+                    0x21 | 0x22 => Access::Random,
+                    _ => Access::RandomBlock,
+                };
+                let write = matches!(r.ah(), 0x15 | 0x22 | 0x28);
+                crate::fcb::transfer(r, mem, &mut self.volume, self.dta, access, write);
+                return Outcome::Resume;
+            }
+            0x11 | 0x12 => {
+                crate::fcb::find(r, mem, &self.volume, self.dta, r.ah() == 0x11);
+                return Outcome::Resume;
+            }
+            0x24 => {
+                crate::fcb::set_random_record(r, mem);
+                return Outcome::Resume;
+            }
             0x19 => {
                 r.set_al(2); // C:
                 return Outcome::Resume;

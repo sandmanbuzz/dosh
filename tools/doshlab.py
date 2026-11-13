@@ -80,6 +80,13 @@ class Result:
         """The 25 rows a terminal attached to the capsule would show."""
         return render_screen(self.consoles[capsule])
 
+    def files(self, capsule: int = 0) -> dict[str, tuple[int, str]]:
+        """Files the capsule's program created or changed, as name -> (size,
+        FNV-1a of the contents). The volume is not written back, so the
+        supervisor reports these when the program exits."""
+        found = self.find("file", capsule=str(capsule))
+        return {e["name"]: (int(e["size"]), e["fnv1a"]) for e in found}
+
     def find(self, subject: str, **match: str) -> list[dict[str, str]]:
         return [e for e in self.events if e["subject"] == subject and all(e.get(k) == v for k, v in match.items())]
 
@@ -87,6 +94,14 @@ class Result:
         found = self.find(subject, **match)
         assert len(found) == 1, f"expected one {subject} {match} event, got {found}\n{self.log}"
         return found[0]
+
+
+def fnv1a(data: bytes) -> str:
+    """The content fingerprint the supervisor logs for changed files."""
+    h = 0x811C9DC5
+    for b in data:
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08x}"
 
 
 def render_screen(stream: bytes, rows: int = 25, cols: int = 80) -> list[str]:

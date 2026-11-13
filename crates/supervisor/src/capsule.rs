@@ -6,7 +6,8 @@
 //! us, deal with the reason, and say whether it may run again.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use dosh_dos::{firmware, video, Dos, Fault, Mem, Outcome, Regs, Volume, RAM_SIZE};
 
@@ -52,6 +53,8 @@ pub struct Capsule {
     stray_io: u64,
     /// Whether the endpoint has switched from the byte stream to the screen.
     screen_shown: bool,
+    /// The provisioned files, by name and content hash, to tell what the program changed.
+    stocked: Vec<(String, u32)>,
     /// The clock tick at which the screen was last drawn.
     drawn_at: u64,
 }
@@ -112,6 +115,7 @@ impl Capsule {
         for (name, data) in spec.files {
             volume.put(&name, data);
         }
+        let stocked = volume.names().map(|n| (n.to_string(), fnv1a(volume.get(n).unwrap_or_default()))).collect();
         let mut mem = Mem::new(vm.ram());
         let mut dos = Dos::new(&mut mem, volume);
         let loaded = dos.exec(&mut mem, &spec.program, &spec.tail);
@@ -129,6 +133,7 @@ impl Capsule {
             preemptions: 0,
             stray_io: 0,
             screen_shown: false,
+            stocked,
             drawn_at: 0,
         };
         match loaded {
@@ -249,6 +254,20 @@ impl Capsule {
         }
     }
 
+    /// Log each file the program created or changed, with a hash of its
+    /// contents: the volume is not written back, so this is how a program's
+    /// output is observed.
+    fn report_changed_files(&self) {
+        let volume = self.dos.volume();
+        for name in volume.names() {
+            let data = volume.get(name).unwrap_or_default();
+            let hash = fnv1a(data);
+            if !self.stocked.iter().any(|(n, h)| n == name && *h == hash) {
+                log!("file capsule={} name={name} size={} fnv1a={hash:08x}", self.id, data.len());
+            }
+        }
+    }
+
     /// The guest is halted at `cs:ip`. If that is a service gate, perform
     /// the service.
     fn service(&mut self) {
@@ -269,6 +288,7 @@ impl Capsule {
             Outcome::WaitInput => self.state = State::WaitingInput,
             Outcome::Exit(code) => {
                 self.state = State::Exited(code);
+                self.report_changed_files();
                 log!(
                     "capsule id={} event=exit code={code} vmexits={} preempted={} stray_io={}",
                     self.id,
@@ -320,4 +340,9 @@ impl Capsule {
             self.exits
         );
     }
+}
+
+/// 32-bit FNV-1a: a cheap content fingerprint for the log.
+fn fnv1a(data: &[u8]) -> u32 {
+    data.iter().fold(0x811C_9DC5, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193))
 }

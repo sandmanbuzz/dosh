@@ -85,6 +85,10 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 | 09h | Write `$`-terminated string | |
 | 0Ah | Buffered line input | Line editing: backspace, bell when full. Echoes CR on Enter. |
 | 0Bh | Input status | |
+| 0Dh, 0Eh | Disk reset, select disk | Nothing to flush; C: is the only drive. |
+| 0Fh, 10h, 16h, 13h, 17h | FCB open, close, create, delete, rename | Wildcards in delete and rename. |
+| 11h, 12h | FCB find first / next | Standard and extended FCBs. |
+| 14h, 15h, 21h, 22h, 24h, 27h, 28h | FCB sequential, random and block I/O | State lives in the FCB. The random record is three bytes for records of 64 bytes or more. |
 | 19h | Current drive | Always C:. |
 | 1Ah, 2Fh | Set / get disk transfer address | Find first/next keep their search state in it. |
 | 25h, 35h | Set / get interrupt vector | Act on the real vector table. |
@@ -111,7 +115,8 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 
 | Interrupt | Function |
 | --- | --- |
-| `INT 10h`, `AH = 0Eh` | Teletype output, to the console. No other video service. |
+| `INT 10h` | `AH=0Eh` teletype output to the console. Once a program calls any other function it has a screen: 00h set mode (2 and 3 only), 01h–03h cursor shape and position, 05h (page 0), 06h/07h scroll, 08h–0Ah read/write character, 0Fh current mode, 13h write string, and the EGA probe (12h, BL=10h) answering "no EGA". One page; other modes and pages fault by name. |
+| `INT 16h` | 00h/10h read key (waits), 01h/11h peek, 02h/12h shift state (always 0). Keys are scan code and ASCII; arrows, function keys, Home/End/PgUp/PgDn/Ins/Del decode from terminal escape sequences. No modifiers, no key releases. |
 | `INT 11h`, `INT 12h` | Equipment word; conventional memory size. |
 | `INT 20h` | Terminate. |
 | `INT 29h` | Fast console output. |
@@ -141,9 +146,24 @@ type-ahead flush and no Ctrl-C or Ctrl-Break handling.
 
 ## Known gaps a real program will hit soon
 
-In rough order of expected demand: date and time (2Ah, 2Ch, `INT 1Ah AH=02h`);
+In rough order of expected demand: date and time (2Ah, 2Ch, `INT 1Ah AH=02h`); text attributes beyond blink/intensity, video pages;
 file attributes (43h); directories (39h–3Bh, 47h);
 `EXEC` and child processes (4Bh, 4Dh); FCB file I/O; keyboard and video
 BIOS services (`INT 16h`, `INT 10h` beyond teletype); Ctrl-C and
 critical-error handling (`INT 23h`, `INT 24h`); country information (38h);
 terminate-and-stay-resident (31h).
+
+
+## The screen
+
+An 80x25 colour text buffer sits at B800:0000, and programs may write it
+directly. The first `INT 10h` call other than teletype marks the program as
+having a screen; from then on its DOS console output is drawn there and the
+serial endpoint carries an ANSI rendering (code page 437 as UTF-8, CGA
+colours mapped, changes only) instead of the byte stream. Port 3DAh answers
+with a synthetic retrace pattern so programs that wait for it proceed.
+There is no other adapter I/O: writes to other ports are discarded.
+
+When a program exits, the supervisor logs `file capsule=N name=... size=...
+fnv1a=...` for each file it created or changed, since drive C: is not
+written back.

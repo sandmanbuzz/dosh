@@ -352,6 +352,8 @@ def test_arc_crunches_a_file_into_a_new_archive(dosh):
     result = dosh("ARC.EXE a T.ARC FOX.TXT", files={"ARC.EXE": corpus_file("early", "ARC.EXE"), "FOX.TXT": text})
     assert exited(result) == 0
     assert b"Adding file:   FOX.TXT" in result.consoles[0] and b"done" in result.consoles[0]
+    size, _ = result.files()["T.ARC"]
+    assert 0 < size < len(text) // 3, "a repetitive file crunches to a fraction of its size"
 
 
 # --- the text display and the keyboard ------------------------------------------
@@ -380,7 +382,7 @@ def test_screen_programs_start_as_a_byte_stream(dosh):
     [
         ("earliest", "TURBO.COM", "TURBO Pascal system"),
         ("earliest", "VC.COM", "VisiCalc Advanced Version"),
-        ("early", "WS.COM", "WordStar Release 3.31q"),
+        ("early", "WS.COM", "O P E N I N G   M E N U"),
     ],
 )
 def test_full_screen_programs_put_up_their_first_screen(accel, folder, program, banner):
@@ -392,3 +394,15 @@ def test_full_screen_programs_put_up_their_first_screen(accel, folder, program, 
     assert result.timed_out, f"the program should be waiting for a key:\n{result.log}"
     assert not result.find("capsule", event="fault"), result.log
     assert any(banner in row for row in result.screen()), "\n".join(result.screen())
+
+
+def test_wordstar_saves_a_document(dosh):
+    """Type into WordStar, save and exit: the file exists on C: with our text."""
+    files = {p.name: p.read_bytes() for p in (CORPUS / "early").iterdir()} if (CORPUS / "early").exists() else {}
+    corpus_file("early", "WS.COM")
+    keys = b" \rdNOTE.TXT\rHello from WordStar\r\x0bx"  # key, open NOTE.TXT, type, ^KX
+    result = dosh("WS.COM", files=files, stdin=[keys], timeout=60)
+    assert exited(result) == 0
+    text = b"Hello from WordStar\r\n"
+    saved = text + b"\x1a" * (128 - len(text))  # padded to a record with ^Z
+    assert result.files() == {"NOTE.TXT": (len(saved), doshlab.fnv1a(saved))}
