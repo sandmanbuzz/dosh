@@ -34,6 +34,10 @@ hardware yet, and there is no Intel VT-x backend:
 [docs/roadmap.md](docs/roadmap.md) lists what is missing and in what order
 it should arrive.
 
+## Licence
+
+Public domain under [the Unlicense](LICENSE): no rights reserved. This is not CC0.
+
 ## Try it
 
 The only host requirement is `podman`. Everything else lives in the lab

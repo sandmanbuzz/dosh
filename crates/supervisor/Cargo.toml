@@ -3,6 +3,7 @@ name = "dosh"
 description = "The DOSH supervisor: a bare-metal host for DOS applications"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]
