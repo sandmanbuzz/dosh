@@ -4,6 +4,7 @@ use crate::arena;
 use crate::firmware::CONVENTIONAL_TOP;
 use crate::mem::Mem;
 use crate::Regs;
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadError {
@@ -70,21 +71,37 @@ fn mz_header(file: &[u8]) -> Option<Result<MzHeader, LoadError>> {
     })())
 }
 
-fn env_block(mem: &mut Mem, program: &str) -> Result<u16, LoadError> {
-    const VARS: &[u8] = b"PATH=C:\\\0COMSPEC=C:\\COMMAND.COM\0\0";
+/// The variables every root process starts with.
+pub const DEFAULT_ENV: &[u8] = b"PATH=C:\\\0COMSPEC=C:\\COMMAND.COM\0\0";
+
+/// The variables of the environment block at `seg`, up to and including the
+/// empty string that ends them.
+pub fn env_vars(mem: &Mem, seg: u16) -> Vec<u8> {
+    let mut vars = Vec::new();
+    for off in 0..=u16::MAX {
+        let b = mem.r8(seg, off);
+        vars.push(b);
+        if b == 0 && (vars.len() == 1 || vars[vars.len() - 2] == 0) {
+            break;
+        }
+    }
+    vars
+}
+
+fn env_block(mem: &mut Mem, program: &str, vars: &[u8]) -> Result<u16, LoadError> {
     // Variables, then a count of trailing strings (1), then the full path of
     // the program, as DOS 3+ provides.
-    let len = VARS.len() + 2 + 3 + program.len() + 1;
+    let len = vars.len() + 2 + 3 + program.len() + 1;
     let seg = arena::alloc(mem, len.div_ceil(16) as u16, 0xFFFF).map_err(|_| LoadError::NoMemory)?;
     let mut off = 0;
-    for part in [VARS, &[1, 0], b"C:\\", program.as_bytes(), &[0]] {
+    for part in [vars, &[1, 0], b"C:\\", program.as_bytes(), &[0]] {
         mem.write(seg, off, part);
         off += part.len() as u16;
     }
     Ok(seg)
 }
 
-fn build_psp(mem: &mut Mem, psp: u16, env: u16, tail: &[u8]) {
+fn build_psp(mem: &mut Mem, psp: u16, parent: u16, env: u16, tail: &[u8]) {
     mem.write(psp, 0, &[0; 256]);
     mem.write(psp, 0x00, &[0xCD, 0x20]); // INT 20h: `ret` from a COM program ends it
     mem.w16(psp, 0x02, psp + arena::size(mem, psp)); // first segment past the program
@@ -93,7 +110,7 @@ fn build_psp(mem: &mut Mem, psp: u16, env: u16, tail: &[u8]) {
         mem.w16(psp, slot, mem.r16(0, vector * 4));
         mem.w16(psp, slot + 2, mem.r16(0, vector * 4 + 2));
     }
-    mem.w16(psp, 0x16, psp); // parent: the root process is its own parent
+    mem.w16(psp, 0x16, parent);
     mem.write(psp, 0x18, &[0xFF; 20]); // job file table
     mem.write(psp, 0x18, &[1, 1, 1, 0, 2]);
     mem.w16(psp, 0x2C, env);
@@ -113,8 +130,17 @@ fn build_psp(mem: &mut Mem, psp: u16, env: u16, tail: &[u8]) {
 
 /// Load `file` as a new process and return its initial register state.
 /// `program` is its name on drive C:; `tail` is the raw command tail,
-/// including its customary leading space.
-pub fn load(mem: &mut Mem, file: &[u8], program: &str, tail: &[u8]) -> Result<(u16, Regs), LoadError> {
+/// including its customary leading space. `parent` is the PSP of the process
+/// starting it (the root process is its own parent) and `vars` its
+/// environment variables, in the form [`env_vars`] returns.
+pub fn load(
+    mem: &mut Mem,
+    file: &[u8],
+    program: &str,
+    tail: &[u8],
+    parent: Option<u16>,
+    vars: &[u8],
+) -> Result<(u16, Regs), LoadError> {
     if tail.len() > TAIL_MAX {
         return Err(LoadError::TailTooLong);
     }
@@ -122,7 +148,7 @@ pub fn load(mem: &mut Mem, file: &[u8], program: &str, tail: &[u8]) -> Result<(u
     if mz.is_none() && file.len() > COM_MAX {
         return Err(LoadError::BadImage);
     }
-    let env = env_block(mem, program)?;
+    let env = env_block(mem, program, vars)?;
 
     // A program is given the largest free block; an MZ header may cap it.
     let largest = match arena::alloc(mem, 0xFFFF, 0) {
@@ -145,7 +171,7 @@ pub fn load(mem: &mut Mem, file: &[u8], program: &str, tail: &[u8]) -> Result<(u
     arena::set_owner(mem, psp, psp);
     arena::set_owner(mem, env, psp);
     debug_assert!(psp + paras <= CONVENTIONAL_TOP);
-    build_psp(mem, psp, env, tail);
+    build_psp(mem, psp, parent.unwrap_or(psp), env, tail);
 
     let mut regs = Regs { ds: psp, es: psp, flags: 0x0202, ..Regs::default() };
     match mz {

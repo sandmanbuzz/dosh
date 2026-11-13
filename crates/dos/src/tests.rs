@@ -339,8 +339,8 @@ fn vectors_are_real_and_unknown_services_fault() {
     assert!(m.call(0x3560));
     assert_eq!((m.regs.es, m.regs.bx), (0x1234, 0x5678));
 
-    m.regs.ax = 0x4B00;
-    assert_eq!(m.int21().0, Outcome::Fault(Fault::Unimplemented { vector: 0x21, ah: 0x4B, al: 0 }));
+    m.regs.ax = 0x4B01;
+    assert_eq!(m.int21().0, Outcome::Fault(Fault::Unimplemented { vector: 0x21, ah: 0x4B, al: 1 }));
     m.regs.ax = 0x4C2A;
     assert_eq!(m.int21().0, Outcome::Exit(0x2A));
     let (mut regs, mut ram) = (m.regs, std::mem::take(&mut m.ram));

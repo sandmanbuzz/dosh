@@ -113,8 +113,21 @@ pub enum Fault {
     Exception { vector: u8 },
 }
 
+/// A process waiting for the child it started to end.
+struct Parent {
+    psp: u16,
+    dta: (u16, u16),
+    handles: [Option<usize>; 20],
+    /// Its registers at the EXEC call; the stack holds the interrupt frame.
+    regs: Regs,
+}
+
 /// The DOS state of one capsule.
 pub struct Dos {
+    /// Processes waiting on their children, outermost first.
+    parents: Vec<Parent>,
+    /// How the last child ended, for INT 21h/4Dh.
+    child_code: u16,
     volume: Volume,
     psp: u16,
     dta: (u16, u16),
@@ -154,6 +167,8 @@ impl Dos {
         handles[3..5].fill(Some(1));
         let open = alloc::vec![Some((files::Handle::Console, 3)), Some((files::Handle::Null, 2))];
         Self {
+            parents: Vec::new(),
+            child_code: 0,
             volume,
             psp: 0,
             dta: (0, 0x80),
@@ -209,7 +224,7 @@ impl Dos {
     /// register state it starts with.
     pub fn exec(&mut self, mem: &mut Mem, program: &str, tail: &[u8]) -> Result<Regs, LoadError> {
         let file = self.volume.get(program).ok_or(LoadError::NotFound)?;
-        let (psp, regs) = exec::load(mem, file, &program.to_ascii_uppercase(), tail)?;
+        let (psp, regs) = exec::load(mem, file, &program.to_ascii_uppercase(), tail, None, exec::DEFAULT_ENV)?;
         self.psp = psp;
         self.dta = (psp, 0x80);
         Ok(regs)
@@ -221,8 +236,7 @@ impl Dos {
     pub fn interrupt(&mut self, vector: u8, regs: &mut Regs, mem: &mut Mem, con: &mut dyn CharDevice) -> Outcome {
         // Services report through the caller's flags, which are in the
         // interrupt frame rather than the live register.
-        let flags_at = regs.sp.wrapping_add(4);
-        let live_flags = core::mem::replace(&mut regs.flags, mem.r16(regs.ss, flags_at));
+        let live_flags = core::mem::replace(&mut regs.flags, mem.r16(regs.ss, regs.sp.wrapping_add(4)));
         let outcome = match vector {
             0x10 if regs.ah() == 0x0E => {
                 con.write(regs.al());
@@ -263,7 +277,15 @@ impl Dos {
             0x00..=0x07 => Outcome::Fault(Fault::Exception { vector }),
             _ => Outcome::Fault(Fault::Unimplemented { vector, ah: regs.ah(), al: regs.al() }),
         };
-        mem.w16(regs.ss, flags_at, regs.flags);
+        // A child ending means a different stack from the one the call came in on.
+        let outcome = match outcome {
+            Outcome::Exit(code) if !self.parents.is_empty() => {
+                self.return_to_parent(code, regs, mem);
+                Outcome::Resume
+            }
+            other => other,
+        };
+        mem.w16(regs.ss, regs.sp.wrapping_add(4), regs.flags);
         regs.flags = live_flags;
         outcome
     }

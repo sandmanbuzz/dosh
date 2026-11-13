@@ -106,6 +106,12 @@ def test_command_line_reaches_the_program(dosh):
     assert exited(result) == 0
 
 
+def test_a_program_starts_children_and_resumes(dosh):
+    result = dosh("EXEC.COM", files={n: (doshlab.GUESTS / n).read_bytes() for n in ("ARGS.COM", "EXIT42.COM")})
+    assert result.consoles[0] == b"[ hi]\r\ncode=03\r\ncode=42\r\nparent resumed\r\n"
+    assert exited(result) == 0
+
+
 def test_mz_executable_is_relocated_and_runs(dosh):
     result = dosh("HELLOMZ.EXE")
     assert result.consoles[0] == b"Hello from an MZ executable\r\nand from its second code segment\r\n"

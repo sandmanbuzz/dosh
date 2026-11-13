@@ -4,9 +4,12 @@ use alloc::vec::Vec;
 
 use crate::files::{self, Handle, Target, MODE_READ, MODE_WRITE};
 use crate::mem::Mem;
-use crate::{arena, CharDevice, Dos, Fault, Outcome, Regs, DOS_VERSION, FLAG_CF, FLAG_ZF};
+use crate::{arena, exec, CharDevice, Dos, Fault, Outcome, Regs, DOS_VERSION, FLAG_CF, FLAG_ZF};
 
 const ERR_BAD_FUNCTION: u16 = 1;
+const ERR_NO_MEMORY: u16 = 8;
+const ERR_BAD_ENVIRONMENT: u16 = 10;
+const ERR_BAD_FORMAT: u16 = 11;
 /// Characters a console handle read accepts per line, as in DOS.
 const CON_LINE_MAX: usize = 126;
 
@@ -118,6 +121,70 @@ impl Dos {
             }
         }
         Ok(())
+    }
+
+    /// EXEC (AH=4Bh AL=0): load a program as a child of the caller and start
+    /// it. The caller resumes, with AX=0 and carry clear, when the child ends.
+    fn spawn(&mut self, r: &mut Regs, mem: &mut Mem) -> DosResult {
+        let Target::File(name) = files::resolve(&path_at(mem, r.ds, r.dx))? else {
+            return Err(files::ERR_ACCESS_DENIED);
+        };
+        let file = self.volume.get(&name).ok_or(files::ERR_FILE_NOT_FOUND)?;
+        // The parameter block: environment, command tail, two FCBs.
+        let (pb_seg, pb) = (r.es, r.bx);
+        let far = |mem: &Mem, at: u16| (mem.r16(pb_seg, pb.wrapping_add(at + 2)), mem.r16(pb_seg, pb.wrapping_add(at)));
+        let env_seg = match mem.r16(pb_seg, pb) {
+            0 => mem.r16(self.psp, 0x2C),
+            seg => seg,
+        };
+        let vars = exec::env_vars(mem, env_seg);
+        let (tail_seg, tail_off) = far(mem, 2);
+        let fcbs = [far(mem, 6), far(mem, 10)];
+        let mut tail = alloc::vec![0; mem.r8(tail_seg, tail_off) as usize];
+        mem.read(tail_seg, tail_off.wrapping_add(1), &mut tail);
+        let (psp, start) = exec::load(mem, file, &name, &tail, Some(self.psp), &vars).map_err(|e| match e {
+            exec::LoadError::NotFound => files::ERR_FILE_NOT_FOUND,
+            exec::LoadError::BadImage => ERR_BAD_FORMAT,
+            exec::LoadError::NoMemory => ERR_NO_MEMORY,
+            exec::LoadError::TailTooLong => ERR_BAD_ENVIRONMENT,
+        })?;
+        for (slot, (seg, off)) in [0x5C, 0x6C].into_iter().zip(fcbs) {
+            let mut fcb = [0; 16];
+            mem.read(seg, off, &mut fcb);
+            mem.write(psp, slot, &fcb);
+        }
+        self.parents.push(crate::Parent { psp: self.psp, dta: self.dta, handles: self.handles, regs: *r });
+        // The child shares the parent's open files.
+        for entry in self.handles.iter().flatten() {
+            if let Some((_, refs)) = self.open[*entry].as_mut() {
+                *refs += 1;
+            }
+        }
+        self.psp = psp;
+        self.dta = (psp, 0x80);
+        // Arrange for the gate's IRET to land on the child's entry point.
+        let sp = start.sp.wrapping_sub(6);
+        mem.w16(start.ss, sp, start.ip);
+        mem.w16(start.ss, sp.wrapping_add(2), start.cs);
+        mem.w16(start.ss, sp.wrapping_add(4), start.flags);
+        *r = Regs { ss: start.ss, sp, ds: psp, es: psp, flags: start.flags, cs: r.cs, ip: r.ip, ..Regs::default() };
+        Ok(())
+    }
+
+    /// The running process ended: give back what it held and resume its parent.
+    pub(crate) fn return_to_parent(&mut self, code: u8, r: &mut Regs, mem: &mut Mem) {
+        let Some(parent) = self.parents.pop() else { return };
+        arena::free_owned(mem, self.psp);
+        for handle in 0..self.handles.len() {
+            let _ = self.detach(handle as u16);
+        }
+        self.handles = parent.handles;
+        self.psp = parent.psp;
+        self.dta = parent.dta;
+        self.child_code = code as u16;
+        *r = parent.regs;
+        r.ax = 0;
+        r.set_flag(FLAG_CF, false);
     }
 
     /// Duplicate handle `bx` (AH=45h) or make `cx` another name for it (AH=46h).
@@ -534,6 +601,11 @@ impl Dos {
             }),
             0x56 => self.rename(r, mem),
             0x57 => self.file_stamp(r),
+            0x4B if r.al() == 0 => self.spawn(r, mem),
+            0x4D => {
+                r.ax = core::mem::take(&mut self.child_code);
+                Ok(())
+            }
             0x4E => self.find_first(r, mem),
             0x4F => self.find_next(r, mem),
             0x4C => return Outcome::Exit(r.al()),

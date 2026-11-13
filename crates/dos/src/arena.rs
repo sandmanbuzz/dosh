@@ -127,6 +127,21 @@ pub fn resize(mem: &mut Mem, block: u16, paras: u16) -> Result<(), (u16, u16)> {
     Ok(())
 }
 
+/// Free every block `owner` holds: what a process leaves behind when it ends.
+pub fn free_owned(mem: &mut Mem, owner: u16) {
+    let mut seg = FIRST_MCB;
+    while let Ok(mut mcb) = load(mem, seg) {
+        if mcb.owner == owner {
+            mcb.owner = 0;
+            store(mem, &mcb);
+        }
+        if mcb.last {
+            break;
+        }
+        seg = mcb.seg + mcb.size + 1;
+    }
+}
+
 pub fn set_owner(mem: &mut Mem, block: u16, owner: u16) {
     mem.w16(block - 1, 1, owner);
 }
