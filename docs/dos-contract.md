@@ -39,9 +39,11 @@ and instructions are available. Port I/O reaches no devices: writes are
 discarded and reads return all ones. Control registers, MSRs and debug
 registers are off limits, and touching them faults the capsule.
 
-Nothing delivers hardware interrupts. There is no timer tick (`INT 08h`,
-`INT 1Ch`), no keyboard interrupt, and a `HLT` outside a service gate
-faults the capsule, because nothing would ever wake it.
+Nothing delivers hardware interrupts yet: no timer tick (`INT 08h`,
+`INT 1Ch`) and no keyboard interrupt. The BIOS clock is kept current in the
+BIOS data area (0040:006Ch, the tick count, and 0040:0070h, the midnight
+flag), and `INT 1Ah AH=00h` reads it. A `HLT` outside a service gate faults
+the capsule, because nothing would ever wake it.
 
 ## Program loading
 
@@ -128,7 +130,7 @@ type-ahead flush and no Ctrl-C or Ctrl-Break handling.
 
 ## Known gaps a real program will hit soon
 
-In rough order of expected demand: date and time (2Ah, 2Ch, `INT 1Ah`);
+In rough order of expected demand: date and time (2Ah, 2Ch, `INT 1Ah AH=02h`);
 find first/next (4Eh, 4Fh) and file attributes and timestamps (43h, 57h);
 directories (39h–3Bh, 47h); handle duplication and redirection (45h, 46h);
 `EXEC` and child processes (4Bh, 4Dh); FCB file I/O; keyboard and video

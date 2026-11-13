@@ -124,6 +124,9 @@ pub struct Dos {
     cooked: VecDeque<u8>,
     /// The error code of the last failed call, for "get extended error".
     last_error: u16,
+    /// The BIOS tick count the clock last set, kept outside guest memory so
+    /// a guest that overwrites 0040:006Ch cannot fake a midnight.
+    bios_ticks: u32,
 }
 
 impl Dos {
@@ -144,11 +147,24 @@ impl Dos {
             line: Vec::new(),
             cooked: VecDeque::new(),
             last_error: 0,
+            bios_ticks: 0,
         }
     }
 
     pub fn volume(&self) -> &Volume {
         &self.volume
+    }
+
+    /// Advance the BIOS clock to `hz100`, the capsule's monotonic clock in
+    /// hundredths of a second. The supervisor calls this before each run of
+    /// the guest, so the guest reads the time from memory and from `INT 1Ah`.
+    pub fn set_clock(&mut self, mem: &mut Mem, hz100: u64) {
+        let count = firmware::ticks_at(hz100);
+        if count < self.bios_ticks {
+            firmware::set_midnight(mem);
+        }
+        self.bios_ticks = count;
+        firmware::write_ticks(mem, count);
     }
 
     /// Load `program` from C: as the capsule's root process. Returns the
@@ -180,6 +196,14 @@ impl Dos {
             }
             0x12 => {
                 regs.ax = firmware::CONVENTIONAL_KB;
+                Outcome::Resume
+            }
+            0x1A if regs.ah() == 0x00 => {
+                // Read the tick count. The midnight flag is reported once.
+                regs.cx = mem.r16(firmware::BDA, 0x6E);
+                regs.dx = mem.r16(firmware::BDA, 0x6C);
+                regs.set_al(mem.r8(firmware::BDA, 0x70));
+                mem.w8(firmware::BDA, 0x70, 0);
                 Outcome::Resume
             }
             0x20 => Outcome::Exit(0),

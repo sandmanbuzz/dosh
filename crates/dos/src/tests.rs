@@ -44,11 +44,15 @@ impl Machine {
     /// call the service, pop the frame. Returns the outcome and the flags the
     /// caller sees afterwards.
     fn int21(&mut self) -> (Outcome, u16) {
+        self.raise(0x21)
+    }
+
+    fn raise(&mut self, vector: u8) -> (Outcome, u16) {
         let (ss, sp) = (self.regs.ss, self.regs.sp.wrapping_sub(6));
         let mut mem = Mem::new(&mut self.ram);
         mem.w16(ss, sp.wrapping_add(4), self.regs.flags);
         self.regs.sp = sp;
-        let outcome = self.dos.interrupt(0x21, &mut self.regs, &mut mem, &mut self.con);
+        let outcome = self.dos.interrupt(vector, &mut self.regs, &mut mem, &mut self.con);
         self.regs.sp = sp.wrapping_add(6);
         self.regs.flags = mem.r16(ss, sp.wrapping_add(4));
         (outcome, self.regs.flags)
@@ -337,4 +341,39 @@ fn vectors_are_real_and_unknown_services_fault() {
     let (mut regs, mut ram) = (m.regs, std::mem::take(&mut m.ram));
     let out = m.dos.interrupt(0x00, &mut regs, &mut Mem::new(&mut ram), &mut m.con);
     assert_eq!(out, Outcome::Fault(Fault::Exception { vector: 0 }));
+}
+
+#[test]
+fn bios_tick_advances_at_the_bios_rate_and_wraps_at_midnight() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    let read = |m: &mut Machine| {
+        m.regs.ax = 0x0000;
+        let (outcome, _) = m.raise(0x1A);
+        assert_eq!(outcome, Outcome::Resume);
+        (m.regs.cx, m.regs.dx, m.regs.al())
+    };
+
+    // Ten seconds is 182.07 BIOS ticks; the BIOS reports whole ticks.
+    m.dos.set_clock(&mut Mem::new(&mut m.ram), 1000);
+    assert_eq!(read(&mut m), (0, 182, 0));
+    // The tick count is also in memory, where programs may poll it.
+    assert_eq!(Mem::new(&mut m.ram).r16(0x40, 0x6C), 182);
+
+    m.dos.set_clock(&mut Mem::new(&mut m.ram), 1100);
+    assert_eq!(read(&mut m), (0, 200, 0));
+
+    // Just past 24 hours the count wraps to a small value and the midnight
+    // flag is set; the flag is reported once.
+    m.dos.set_clock(&mut Mem::new(&mut m.ram), 8_640_000);
+    let (cx, dx, al) = read(&mut m);
+    assert_eq!((cx, al), (0, 1));
+    assert!(dx < 10, "count after midnight is {dx}");
+    assert_eq!(read(&mut m).2, 0);
+}
+
+#[test]
+fn other_bios_time_services_fault() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    m.regs.ax = 0x0200;
+    assert_eq!(m.raise(0x1A).0, Outcome::Fault(Fault::Unimplemented { vector: 0x1A, ah: 2, al: 0 }));
 }

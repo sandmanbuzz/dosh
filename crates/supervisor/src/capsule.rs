@@ -157,6 +157,9 @@ impl Capsule {
 
     fn step(&mut self) -> bool {
         self.endpoint.pump(&mut self.console);
+        // The clock advances whether or not the guest runs, so a capsule that
+        // is waiting for input still sees midnight.
+        self.dos.set_clock(&mut Mem::new(self.vm.ram()), timer::ticks());
         let ran = match self.state {
             State::Running => {
                 let exit = self.vm.run();

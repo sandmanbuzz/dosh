@@ -45,6 +45,13 @@ def test_com_program_can_end_by_returning(dosh):
     assert exited(result) == 0
 
 
+def test_a_program_sees_the_bios_tick_advance(dosh):
+    # INT 1Ah AH=00h: the guest polls the 32-bit tick count until it has moved.
+    result = dosh("TICK.COM")
+    assert result.consoles[0] == b"TICK OK\r\n"
+    assert exited(result) == 0
+
+
 def test_command_line_reaches_the_program(dosh):
     result = dosh("ARGS.COM one  two")
     assert result.consoles[0] == b"[ one  two]\r\n"
