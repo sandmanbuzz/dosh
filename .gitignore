@@ -1,0 +1,6 @@
+/target/
+/.lab/
+/build/
+__pycache__/
+.pytest_cache/
+/docs/internal/

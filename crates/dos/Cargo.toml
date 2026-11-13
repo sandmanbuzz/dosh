@@ -1,0 +1,6 @@
+[package]
+name = "dosh-dos"
+description = "DOS compatibility services for a DOSH execution capsule"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

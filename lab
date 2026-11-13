@@ -1,0 +1,32 @@
+#!/bin/sh
+# Run a command inside the DOSH lab container (default: an interactive shell).
+#
+#   ./lab                 shell
+#   ./lab make test       build everything and run the acceptance tests
+#
+# The image is built on first use and rebuilt whenever its Containerfile
+# changes. The checkout is mounted at /work; build caches live in .lab/ and
+# target/ inside the checkout, so separate checkouts never share state.
+set -eu
+root=$(cd "$(dirname "$0")" && pwd)
+image=dosh-lab:$(sha256sum "$root/tools/lab/Containerfile" | cut -c1-12)
+
+if ! podman image exists "$image"; then
+    podman build -t "$image" -f "$root/tools/lab/Containerfile" "$root/tools/lab" >&2
+fi
+
+# Hardware virtualization is optional: without /dev/kvm the lab still boots
+# DOSH under QEMU's software CPU.
+kvm=
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then kvm="--device /dev/kvm"; fi
+tty=-i
+if [ -t 0 ] && [ -t 1 ]; then tty=-it; fi
+[ $# -gt 0 ] || set -- bash
+
+mkdir -p "$root/.lab/home"
+# shellcheck disable=SC2086
+exec podman run --rm $tty $kvm \
+    --userns=keep-id --security-opt label=disable \
+    -v "$root:/work" -w /work \
+    -e HOME=/work/.lab/home -e CARGO_HOME=/work/.lab/cargo \
+    "$image" "$@"

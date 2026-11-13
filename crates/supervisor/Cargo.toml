@@ -1,0 +1,11 @@
+[package]
+name = "dosh"
+description = "The DOSH supervisor: a bare-metal host for DOS applications"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+dosh-dos = { path = "../dos" }
+linked_list_allocator = "0.10"
+uefi = { version = "0.41", features = ["alloc"] }
