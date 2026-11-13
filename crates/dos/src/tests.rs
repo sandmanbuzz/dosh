@@ -468,7 +468,8 @@ fn parse_filename_fills_an_fcb() {
 
 #[test]
 fn find_first_and_next_walk_drive_c() {
-    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"abc"), ("B.TXT", b""), ("C.DAT", b"x")], "P.COM", b"").unwrap();
+    let mut m =
+        Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"abc"), ("B.TXT", b""), ("C.DAT", b"x")], "P.COM", b"").unwrap();
     let ds = m.regs.ds;
     m.mem().write(ds, 0x200, b"c:*.txt\0");
     m.regs.cx = 0;
@@ -551,4 +552,50 @@ fn duplicated_handles_share_a_position_and_outlive_the_original() {
     m.mem().write(ds, 0x300, b"hi");
     assert!(m.call(0x4000));
     assert_eq!(m.con.output, b"hi");
+}
+
+#[test]
+fn rename_moves_a_file_but_never_over_another() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"a"), ("B.TXT", b"b")], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    m.regs.es = ds;
+    let rename = |m: &mut Machine, from: &[u8], to: &[u8]| {
+        m.mem().write(ds, 0x200, from);
+        m.mem().write(ds, 0x240, to);
+        (m.regs.dx, m.regs.di) = (0x200, 0x240);
+        m.call(0x5600).then_some(0).ok_or(m.regs.ax)
+    };
+    assert_eq!(rename(&mut m, b"a.txt\0", b"c:b.txt\0"), Err(5));
+    assert_eq!(rename(&mut m, b"nope\0", b"x\0"), Err(2));
+    assert_eq!(rename(&mut m, b"a.txt\0", b"*.txt\0"), Err(5));
+    assert_eq!(rename(&mut m, b"a.txt\0", b"con\0"), Err(5));
+    assert_eq!(rename(&mut m, b"a.txt\0", b"c.txt\0"), Ok(0));
+    assert_eq!(m.dos.volume.get("C.TXT"), Some(&b"a"[..]));
+    assert_eq!(m.dos.volume.get("A.TXT"), None);
+}
+
+#[test]
+fn ioctl_status_follows_the_input_state() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"a")], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    m.regs.bx = 0;
+    assert!(m.call(0x4406));
+    assert_eq!(m.regs.ax as u8, 0, "no key waiting");
+    m.con.input.push_back(b'k');
+    assert!(m.call(0x4406));
+    assert_eq!(m.regs.ax as u8, 0xFF);
+    assert!(m.call(0x4407));
+    assert_eq!(m.regs.ax as u8, 0xFF);
+    m.mem().write(ds, 0x200, b"A.TXT\0");
+    m.regs.dx = 0x200;
+    assert!(m.call(0x3D00));
+    m.regs.bx = m.regs.ax;
+    assert!(m.call(0x4406));
+    assert_eq!(m.regs.ax as u8, 0xFF);
+    (m.regs.cx, m.regs.dx) = (1, 0x300);
+    assert!(m.call(0x3F00));
+    assert!(m.call(0x4406));
+    assert_eq!(m.regs.ax as u8, 0, "at end of file");
+    m.regs.bx = 99;
+    assert!(!m.call(0x4406));
 }

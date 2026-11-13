@@ -248,6 +248,40 @@ impl Dos {
         self.find(mem).map_err(|e| if e == files::ERR_NO_MORE_FILES { files::ERR_FILE_NOT_FOUND } else { e })
     }
 
+    /// IOCTL status (AL=6 input, 7 output): AL=FFh ready, 0 not. Output never
+    /// blocks. A file is ready for input until its position reaches its end.
+    fn io_status(&mut self, r: &mut Regs, con: &mut dyn CharDevice) -> DosResult {
+        let output = r.al() == 7;
+        let handle = *self.handle(r.bx)?;
+        let ready = match handle {
+            Handle::Console if !output => self.key_ready(con),
+            Handle::File { slot, pos, .. } if !output => (pos as usize) < self.volume.data(slot).len(),
+            _ => true,
+        };
+        r.set_al(if ready { 0xFF } else { 0 });
+        Ok(())
+    }
+
+    fn rename(&mut self, r: &Regs, mem: &Mem) -> DosResult {
+        let (Target::File(from), Target::File(to)) =
+            (files::resolve(&path_at(mem, r.ds, r.dx))?, files::resolve(&path_at(mem, r.es, r.di))?)
+        else {
+            return Err(files::ERR_ACCESS_DENIED); // devices cannot be renamed, or be a name
+        };
+        if from.contains(['*', '?']) || to.contains(['*', '?']) {
+            return Err(files::ERR_ACCESS_DENIED);
+        }
+        let slot = self.volume.slot(&from).ok_or(files::ERR_FILE_NOT_FOUND)?;
+        match self.volume.slot(&to) {
+            Some(existing) if existing == slot => Ok(()),
+            Some(_) => Err(files::ERR_ACCESS_DENIED),
+            None => {
+                self.volume.rename(slot, &to);
+                Ok(())
+            }
+        }
+    }
+
     /// Get (AL=0) or set (AL=1) the time and date of an open file.
     fn file_stamp(&mut self, r: &mut Regs) -> DosResult {
         let Handle::File { slot, .. } = *self.handle(r.bx)? else {
@@ -402,6 +436,7 @@ impl Dos {
                     Handle::File { .. } => 0x0002, // file on drive C:
                 })
                 .map(|info| r.dx = info),
+            0x44 if matches!(r.al(), 6 | 7) => self.io_status(r, con),
             0x45 => self.duplicate(r, false),
             0x46 => self.duplicate(r, true),
             0x48 => match arena::alloc(mem, r.bx, self.psp) {
@@ -419,6 +454,7 @@ impl Dos {
                 r.bx = max;
                 e
             }),
+            0x56 => self.rename(r, mem),
             0x57 => self.file_stamp(r),
             0x4E => self.find_first(r, mem),
             0x4F => self.find_next(r, mem),

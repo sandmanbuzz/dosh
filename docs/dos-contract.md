@@ -86,8 +86,9 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 | 0Ah | Buffered line input | Line editing: backspace, bell when full. Echoes CR on Enter. |
 | 0Bh | Input status | |
 | 19h | Current drive | Always C:. |
-| 1Ah, 2Fh | Set / get disk transfer address | Stored; nothing uses the DTA yet. |
+| 1Ah, 2Fh | Set / get disk transfer address | Find first/next keep their search state in it. |
 | 25h, 35h | Set / get interrupt vector | Act on the real vector table. |
+| 29h | Parse filename into an FCB | All four AL flags; wildcards set AL=1; drives other than C: are invalid (AL=FFh). |
 | 30h | DOS version | 5.00. |
 | 3Ch | Create file | Truncates an existing file. Attributes are ignored. |
 | 3Dh | Open file | Access mode honoured; sharing bits ignored. |
@@ -96,10 +97,14 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 | 40h | Write | Zero bytes sets the file size. A full disk is a short write. |
 | 41h | Delete | |
 | 42h | Seek | From start (unsigned), current or end (signed). |
-| 44h | IOCTL | Subfunction 00h only: device information. |
+| 44h | IOCTL | 00h device information; 06h, 07h input and output status (a file is input-ready until its end). |
+| 45h, 46h | Duplicate handle, force duplicate | Duplicates share one open file, so one file position. |
 | 48h, 49h, 4Ah | Allocate, free, resize memory | First fit; free blocks coalesce. A failed grow leaves the block at its largest possible size, as DOS does. |
 | 4Ch | Exit with return code | Ends the capsule; the code is reported in the supervisor log. |
+| 4Eh, 4Fh | Find first, find next | Wildcard patterns on the root directory; search attributes are ignored because every file is an ordinary one. Failure is error 2 on the first, 12h on the next. |
 | 51h, 62h | Get PSP | |
+| 56h | Rename | Within the root directory. Refuses wildcards, devices and an existing target. |
+| 57h | File time and date | Get and set on an open file. A file nobody has stamped reads 00:00:00 on 1980-01-01: the machine has no calendar. |
 | 59h | Extended error | Exact code; conventional class, action and locus. |
 
 ## Other interrupts
@@ -137,8 +142,7 @@ type-ahead flush and no Ctrl-C or Ctrl-Break handling.
 ## Known gaps a real program will hit soon
 
 In rough order of expected demand: date and time (2Ah, 2Ch, `INT 1Ah AH=02h`);
-find first/next (4Eh, 4Fh) and file attributes and timestamps (43h, 57h);
-directories (39h–3Bh, 47h); handle duplication and redirection (45h, 46h);
+file attributes (43h); directories (39h–3Bh, 47h);
 `EXEC` and child processes (4Bh, 4Dh); FCB file I/O; keyboard and video
 BIOS services (`INT 16h`, `INT 10h` beyond teletype); Ctrl-C and
 critical-error handling (`INT 23h`, `INT 24h`); country information (38h);

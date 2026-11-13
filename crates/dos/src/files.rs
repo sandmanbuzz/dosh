@@ -79,6 +79,12 @@ impl Volume {
         self.files.iter().position(|f| matches!(f, Some((n, ..)) if n.eq_ignore_ascii_case(name)))
     }
 
+    pub(crate) fn rename(&mut self, slot: usize, name: &str) {
+        if let Some(f) = self.files[slot].as_mut() {
+            f.0 = name.to_ascii_uppercase();
+        }
+    }
+
     pub(crate) fn remove(&mut self, slot: usize) {
         self.files[slot] = None;
     }

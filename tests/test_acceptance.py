@@ -285,3 +285,70 @@ def test_bad_manifest_is_reported():
     assert not result.timed_out, result.log
     assert "unknown directive: launch HELLO.COM" in result.find("boot")[-1]["error"]
     assert result.one("shutdown")["capsules"] == "0"
+
+
+# --- third-party programs from the local corpus --------------------------------
+# The corpus is not redistributed with the repository: these tests skip when a
+# binary is absent.
+
+import struct
+from pathlib import Path
+
+import pytest
+
+CORPUS = Path(__file__).resolve().parent.parent / "corpus"
+
+
+def corpus_file(*parts):
+    path = CORPUS.joinpath(*parts)
+    if not path.exists():
+        pytest.skip(f"corpus/{'/'.join(parts)} not present")
+    return path.read_bytes()
+
+
+def arc_crc(data):
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def stored_arc(name, data, date=0x2A4B, time=0x6000):
+    """A one-member ARC archive using the "stored" method."""
+    header = b"\x1a\x02" + name.encode().ljust(13, b"\0")
+    header += struct.pack("<IHHHI", len(data), date, time, arc_crc(data), len(data))
+    return header + data + b"\x1a\x00"
+
+
+def test_arc_lists_and_prints_an_archive(dosh):
+    body = b"Stored inside an archive.\n" * 4
+    files = {"ARC.EXE": corpus_file("early", "ARC.EXE"), "T.ARC": stored_arc("HELLO.TXT", body)}
+    listing = dosh("ARC.EXE l T.ARC", files=files)
+    assert exited(listing) == 0
+    # The length, and the date stored in the archive.
+    assert b"HELLO.TXT" in listing.consoles[0] and str(len(body)).encode() in listing.consoles[0]
+    assert b"11 Feb 01" in listing.consoles[0]
+    shown = dosh("ARC.EXE p T.ARC", files=files)
+    assert exited(shown) == 0
+    # ARC prints members as text, turning each newline into a line break.
+    assert body.replace(b"\n", b"\r\n") in shown.consoles[0]
+
+
+def test_arc_extracts_and_rejects_a_corrupt_member(dosh):
+    body = b"Checked by CRC.\r\n" * 8
+    files = {"ARC.EXE": corpus_file("early", "ARC.EXE")}
+    ok = dosh("ARC.EXE x T.ARC", files={**files, "T.ARC": stored_arc("A.TXT", body)})
+    assert exited(ok) == 0 and b"Extracting file: A.TXT" in ok.consoles[0]
+    bad = bytearray(stored_arc("A.TXT", body))
+    bad[40] ^= 0xFF  # flip a byte of the member
+    broken = dosh("ARC.EXE x T.ARC", files={**files, "T.ARC": bytes(bad)})
+    assert exited(broken) == 1 and b"File A.TXT fails CRC check" in broken.consoles[0]
+
+
+def test_arc_crunches_a_file_into_a_new_archive(dosh):
+    text = b"the quick brown fox jumps over the lazy dog\r\n" * 40
+    result = dosh("ARC.EXE a T.ARC FOX.TXT", files={"ARC.EXE": corpus_file("early", "ARC.EXE"), "FOX.TXT": text})
+    assert exited(result) == 0
+    assert b"Adding file:   FOX.TXT" in result.consoles[0] and b"done" in result.consoles[0]
