@@ -32,6 +32,8 @@ BIOS time (`INT 1Ah`), DOS date and time, and interrupt-driven keyboard
 input (`INT 09h`/`16h`). It also lets the scheduler treat a halted guest as
 idle.
 
+*Status:* done. Timer tick, `INT 1Ah`, DOS date and time, and `HLT` idle exist; guests get interrupts through the timer gate.
+
 *Done when:* programs that poll the BIOS tick or wait in `HLT` loops run,
 and a guest's clock advances at the right rate while other capsules are
 busy.
@@ -44,6 +46,8 @@ suspend, resume and terminate capsules, plus a watchdog policy for capsules
 that run away. Capsule state is already self-contained (`Vm` plus `Dos`),
 so suspend and resume are bookkeeping, and snapshot is serialising those
 two things.
+
+*Status:* partly done. A per-capsule processor-time watchdog (`limit=` in `BOOT.CFG`) and a console mux (Ctrl-] and a digit) exist. The supervisor still runs the manifest and powers off; there is no management channel, suspend or resume.
 
 *Done when:* a test launches a capsule, suspends it mid-computation,
 launches and finishes a second one, resumes the first to the right answer,
@@ -60,6 +64,8 @@ scancodes arrive with step 1.
 This is where the presentation boundary earns its keep: the capsule gains a
 display device; the endpoint decides whether it is drawn locally, sent down
 a serial line as escape sequences, or shipped over a network.
+
+*Status:* mostly done. `INT 10h` text modes, an 80x25 buffer at `B800:0000`, `INT 16h` keyboard decoding and an ANSI renderer (`crates/term`) exist; Turbo Pascal, WordStar and VisiCalc reach their screens over a serial terminal. Change tracking uses per-tick snapshots, not nested-page-table dirty bits. Switching between capsules redraws afresh through the mux.
 
 *Done when:* a full-screen text application — an editor, a file manager —
 is usable through a terminal, and switching the terminal between two such
@@ -81,6 +87,8 @@ Two pieces of lab work make this fast:
 - differential testing against an established DOS implementation —
   DOSBox is in the lab's distribution — so expected output comes from an
   oracle instead of from reading interrupt lists.
+
+*Status:* in progress. Find first/next, attributes and timestamps, `EXEC`, FCBs and handle duplication exist, driven by the local corpus ([corpus.md](corpus.md)); Turbo Pascal builds a `.COM` inside a capsule. Not done: an unzip utility, directories, Ctrl-C and critical errors, TSRs, and the redistributable corpus and differential testing described below.
 
 *Done when:* an unzip utility extracts an archive, and an assembler
 assembles a program that DOSH then runs. That closes the 360K class and

@@ -93,17 +93,23 @@ debugging the bad path. Only reset commits you made.
 | --- | --- |
 | DOS semantics, errors, flags | `crates/dos/src/int21.rs`, `exec.rs`, `files.rs`, `arena.rs` |
 | Interrupt vectors, BIOS data area | `crates/dos/src/firmware.rs` |
+| FCB file calls | `crates/dos/src/fcb.rs` |
+| Text screen, `INT 10h` | `crates/dos/src/video.rs` |
+| Keyboard, `INT 16h`, escape decoding | `crates/dos/src/keyboard.rs` |
+| Drawing the screen on an ANSI terminal | `crates/term/src/lib.rs` |
 | Guest memory and registers | `crates/dos/src/mem.rs`, `Regs` in `lib.rs` |
 | Capsule lifecycle, service gates | `crates/supervisor/src/capsule.rs` |
 | Virtualization (SVM, world switch, exits) | `crates/supervisor/src/hv/` |
 | Boot, manifest, drive C: provisioning | `crates/supervisor/src/boot.rs` |
 | Paging, descriptor tables, traps, UART, clock | `crates/supervisor/src/platform/` |
-| Console transports | `crates/supervisor/src/present.rs` |
+| Console transports, screen delivery | `crates/supervisor/src/present.rs` |
+| Virtual devices (console, display status port) | `crates/supervisor/src/device.rs` |
 | Guest programs | `guests/*.asm`, `guests/wc.c`, `guests/Makefile` |
 | Acceptance tests | `tests/test_acceptance.py`, fixtures in `tests/conftest.py` |
 | Test harness and QEMU wiring | `tools/doshlab.py` |
 | Container | `tools/lab/Containerfile`, `lab` |
 | Contract and design | `docs/dos-contract.md`, `docs/architecture.md` |
+| Third-party binaries tried, and results | `docs/corpus.md` (files are in the untracked `corpus/`) |
 | Plan | `docs/roadmap.md` |
 
 ## Commands
@@ -112,10 +118,11 @@ debugging the bad path. Only reset commits you made.
 ./lab                                  # shell in the lab
 ./lab make efi                         # build the supervisor
 ./lab make guests                      # build the guest corpus
-./lab make check                       # fmt, clippy, unit tests
+./lab make check                       # fmt, clippy, unit tests (dos and term crates)
 ./lab make test                        # everything
 ./lab python3 -m pytest tests -k NAME  # one acceptance test
 ./lab tools/doshlab.py --raw --keep build/run PROGRAM.COM   # diagnose a run
+./lab tools/doshlab.py --screen --corpus corpus/DIR PROGRAM.COM </dev/null   # see a full-screen program
 ```
 
 Build and check steps are plain make targets. Nothing needs a special

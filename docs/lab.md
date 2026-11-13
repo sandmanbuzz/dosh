@@ -30,14 +30,17 @@ so a rebuilt image may pick up point updates to QEMU or OVMF.
 | --- | --- |
 | `make efi` | Build the supervisor: `target/x86_64-unknown-uefi/release/dosh.efi` |
 | `make guests` | Assemble and compile the guest corpus into `build/guests/` |
-| `make check` | rustfmt, clippy with warnings denied, and the DOS crate's unit tests |
+| `make check` | rustfmt, clippy with warnings denied, and the unit tests of the dos and term crates |
 | `make test` | All of the above, then the acceptance suite |
 | `python3 -m pytest tests -k NAME` | Selected acceptance tests |
 | `tools/doshlab.py CAPSULE...` | Boot DOSH with these capsules and show consoles and log |
 
 `tools/doshlab.py` options: `--accel kvm|tcg` picks the execution path;
 `--attach` makes your terminal the first capsule's console; `--keep DIR`
-saves the boot disk and logs of a run; `--raw` prints firmware output too.
+saves the boot disk and logs of a run; `--raw` prints firmware output too;
+`--corpus DIR` puts every file in DIR on drive C: (third-party programs and
+their overlays); `--screen` shows a capsule's console as the 80x25 screen a
+terminal would display, for programs that draw one.
 Piped standard input is delivered to the first capsule once its session
 opens.
 
@@ -76,7 +79,11 @@ real hardware is on the roadmap and has not been attempted.
   each connected to a socket pair inherited by file descriptor.
 
 It then collects console bytes until DOSH powers the machine off, parses
-the supervisor's `[dosh]` lines into events, and returns everything. A
+the supervisor's `[dosh]` lines into events, and returns everything.
+`Result.screen()` replays a console's ANSI output into the 25 rows a
+terminal would show, and `Result.files()` lists the files a capsule's
+program created or changed (size and a content hash, from the `file` events
+the supervisor logs at exit), since drive C: is never written back. A
 capsule's console capture starts after its session banner, so firmware
 output is never mistaken for the guest's. Input is held back until the
 banner too, because firmware would otherwise eat it.
@@ -96,6 +103,14 @@ run in parallel, and separate checkouts have separate build caches
    output and exit code.
 4. If the DOS behaviour has edge cases, add a unit test next to the others
    in `crates/dos/src/tests.rs`; they run in milliseconds.
+
+For a full-screen program, assert on `result.screen()` rather than the raw
+console bytes.
+
+Third-party binaries are not committed. Keep them in `corpus/` (git-ignored)
+and record what each is, its hash and what was observed in
+[corpus.md](corpus.md). A test that needs one should skip when the file is
+absent (`corpus_file()` in `tests/test_acceptance.py` does that).
 
 For a third-party binary, the loop is the same, starting from the fault
 line the supervisor prints when the program asks for something outside the

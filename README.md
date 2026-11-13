@@ -20,16 +20,27 @@ inside.
   processor to make a DOS or BIOS call.
 - A first DOS contract: program loading and relocation, PSP and environment,
   command line, conventional memory management, console I/O (raw and
-  line-edited), file handles on a per-capsule drive C:, exit codes.
+  line-edited), file handles and FCBs on a per-capsule drive C:, date and
+  time, child processes (`EXEC`), exit codes.
+  [docs/dos-contract.md](docs/dos-contract.md) is the precise list.
   [docs/dos-contract.md](docs/dos-contract.md) is the precise list.
 - Several capsules at once, isolated from one another and scheduled
-  preemptively, each with its own console carried over its own serial port.
+  preemptively, each with its own console carried over its own serial port,
+  or all of them on one line with `console mux`. A per-capsule processor-time
+  limit stops one that runs away.
+- A text screen: an 80x25 colour buffer, the video and keyboard BIOS, and a
+  terminal renderer, so full-screen programs are usable over a serial
+  terminal. Turbo Pascal, WordStar and VisiCalc have been run this way; the
+  period binaries themselves are not in the repository
+  ([docs/corpus.md](docs/corpus.md) says what was tried).
 - A guest that misbehaves — an unknown DOS call, an unhandled exception, an
   attempt to leave real mode, a triple fault — stops its own capsule with a
   specific diagnostic. The supervisor and the other capsules carry on.
 
-The test corpus is small assembly programs plus one C program built with a
-compiler and C library from elsewhere. Nothing here has run on physical
+The guest corpus is small assembly programs (including a small
+`COMMAND.COM` shell) plus one C program built with a compiler and C library
+from elsewhere. Third-party binaries are kept locally in `corpus/`, which is
+not committed. Nothing here has run on physical
 hardware yet, and there is no Intel VT-x backend:
 [docs/roadmap.md](docs/roadmap.md) lists what is missing and in what order
 it should arrive.
@@ -99,6 +110,16 @@ Run `./lab tools/doshlab.py --help` for every option. The corpus of programs
 is in [guests/](guests/) and what each one proves is in the
 [acceptance tests](tests/test_acceptance.py).
 
+Programs that draw a screen can be shown as the 80x25 screen they draw
+instead of a raw byte stream, and a directory of extra files can be put on
+drive C: (an example needing a local copy of the program, see
+[docs/corpus.md](docs/corpus.md)):
+
+```sh
+./lab tools/doshlab.py --screen --timeout 10 SCREEN.COM </dev/null
+./lab tools/doshlab.py --corpus corpus/early --screen --timeout 10 WS.COM </dev/null
+```
+
 #### Running your own program
 
 After `./lab make guests`, copy a `.COM` or `.EXE` into `build/guests/` and
@@ -160,6 +181,8 @@ say which one they used.
 | `crates/dos` | DOS compatibility services, free of any hardware knowledge and unit-tested on the host |
 | `guests/` | The guest corpus: small DOS programs, one per behaviour |
 | `tests/` | Acceptance tests: boot the real artifact, run the corpus, check the results |
+| `crates/term` | Draws a text screen on an ANSI terminal (`no_std`, unit-tested on the host) |
+| `corpus/` | Third-party binaries, local only and not committed; catalogued in [docs/corpus.md](docs/corpus.md) |
 | `tools/doshlab.py` | Boots DOSH in QEMU and reports what happened; a library and a command |
 | `tools/lab/`, `lab` | The development laboratory |
-| `docs/` | [Architecture](docs/architecture.md), [DOS contract](docs/dos-contract.md), [lab](docs/lab.md), [roadmap](docs/roadmap.md) |
+| `docs/` | [Architecture](docs/architecture.md), [DOS contract](docs/dos-contract.md), [lab](docs/lab.md), [roadmap](docs/roadmap.md), [corpus](docs/corpus.md) |

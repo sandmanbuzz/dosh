@@ -30,17 +30,20 @@ guest in `guests/` with an acceptance test, or both.
 | `0000:0000` | Interrupt vector table. All 256 vectors are valid and point at service gates. |
 | `0040:0000` | BIOS data area: equipment word, 640 KB conventional memory, 80×25 colour text mode. |
 | `1000:0000`–`9FFF:000F` | The DOS memory arena, a standard MCB chain. Programs load above 64 KiB. |
-| `A000:0000`–`EFFF:000F` | Plain memory. No display adapter is behind it. |
+| `A000:0000`–`B7FF:000F` | Plain memory. No graphics adapter is behind it. |
+| `B800:0000` | The 80×25 colour text buffer (see [The screen](#the-screen)). Plain memory around it. |
+| `C000:0000`–`EFFF:000F` | Plain memory. |
 | `F000:0000` | Service gates (see [architecture.md](architecture.md)). |
 | above `FFFF:000F` | Wraps to `0000:0000`: the A20 line is off. |
 
 The processor is whatever the machine has, in real mode. 32-bit registers
-and instructions are available. Port I/O reaches no devices: writes are
-discarded and reads return all ones. Control registers, MSRs and debug
+and instructions are available. Port I/O reaches no devices except the
+display status port 3DAh (see [The screen](#the-screen)): other writes are
+discarded and other reads return all ones. Control registers, MSRs and debug
 registers are off limits, and touching them faults the capsule.
 
 The only hardware interrupt delivered is the clock tick, `INT 08h`. There is
-no keyboard interrupt yet. The BIOS clock is kept current in the
+no keyboard interrupt: keys are read through `INT 16h` and DOS. The BIOS clock is kept current in the
 BIOS data area (0040:006Ch, the tick count, and 0040:0070h, the midnight
 flag), and `INT 1Ah AH=00h` reads it. The BIOS clock advances at its own
 rate, about 18.2 a second of elapsed time, and each advance is delivered as
@@ -143,7 +146,8 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 
 ## The console
 
-One character device per capsule, a byte stream in each direction. DOS
+One character device per capsule, a byte stream in each direction. Until a
+program takes over the display (see [The screen](#the-screen)), DOS
 output is passed through untranslated: a program that writes CR LF sends
 CR LF. On input, CR is Enter, backspace and DEL erase, and a LF directly
 from the stream is ignored so that peers which send CR LF work. There is no
