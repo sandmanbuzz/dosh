@@ -8,6 +8,7 @@ use crate::{arena, exec, CharDevice, Dos, Fault, Outcome, Regs, DOS_VERSION, FLA
 
 const ERR_BAD_FUNCTION: u16 = 1;
 const ERR_NO_MEMORY: u16 = 8;
+const ERR_INVALID_DRIVE: u16 = 15;
 const ERR_BAD_ENVIRONMENT: u16 = 10;
 const ERR_BAD_FORMAT: u16 = 11;
 /// Characters a console handle read accepts per line, as in DOS.
@@ -588,6 +589,30 @@ impl Dos {
                 None => return Outcome::WaitInput,
             },
             0x40 => self.write(r, mem, con),
+            0x39 | 0x3A => files::resolve(&path_at(mem, r.ds, r.dx)).and(Err(files::ERR_ACCESS_DENIED)), // no subdirectories
+            0x3B => match path_at(mem, r.ds, r.dx).as_slice() {
+                // The root is the only directory, and the only one to enter.
+                b"\\" | b"/" | b"." | b"C:\\" | b"c:\\" | b"C:" | b"c:" => Ok(()),
+                _ => Err(files::ERR_PATH_NOT_FOUND),
+            },
+            0x43 => match files::resolve(&path_at(mem, r.ds, r.dx)) {
+                Ok(Target::File(name)) if self.volume.slot(&name).is_some() => match r.al() {
+                    0 => {
+                        r.cx = 0x20; // every file is an ordinary, archive-flagged one
+                        Ok(())
+                    }
+                    1 if r.cx & !0x20 == 0 => Ok(()),
+                    _ => Err(files::ERR_ACCESS_DENIED),
+                },
+                Ok(Target::File(_)) => Err(files::ERR_FILE_NOT_FOUND),
+                Ok(_) => Err(files::ERR_ACCESS_DENIED),
+                Err(e) => Err(e),
+            },
+            0x47 if matches!(r.dl(), 0 | 3) => {
+                mem.w8(r.ds, r.si, 0); // the root: DOS gives the path without the drive or leading backslash
+                Ok(())
+            }
+            0x47 => Err(ERR_INVALID_DRIVE),
             0x41 => match files::resolve(&path_at(mem, r.ds, r.dx)) {
                 Ok(Target::File(name)) => match self.volume.slot(&name) {
                     Some(slot) => {

@@ -774,3 +774,34 @@ fn fcb_files_open_read_write_and_find() {
     assert!(m.call(0x1300));
     assert_eq!(m.regs.ax as u8, 0xFF);
 }
+
+#[test]
+fn the_root_is_the_only_directory() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3]), ("A.TXT", b"x")], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    let path = |m: &mut Machine, p: &[u8]| {
+        m.mem().write(ds, 0x200, p);
+        m.regs.dx = 0x200;
+    };
+    m.regs.si = 0x300;
+    m.mem().w8(ds, 0x300, 0x55);
+    assert!(m.call(0x4700));
+    assert_eq!(m.mem().r8(ds, 0x300), 0, "the current directory is the root: an empty path");
+    m.regs.dx = 5;
+    assert!(!m.call(0x4700) && m.regs.ax == 15, "no drive E:");
+
+    path(&mut m, b"\\\0");
+    assert!(m.call(0x3B00));
+    path(&mut m, b"\\SUB\0");
+    assert!(!m.call(0x3B00) && m.regs.ax == 3);
+    path(&mut m, b"SUB\0");
+    assert!(!m.call(0x3900) && m.regs.ax == 5, "directories cannot be made");
+
+    path(&mut m, b"A.TXT\0");
+    assert!(m.call(0x4300));
+    assert_eq!(m.regs.cx, 0x20);
+    m.regs.cx = 1; // read-only would be a lie: nothing enforces it
+    assert!(!m.call(0x4301) && m.regs.ax == 5);
+    path(&mut m, b"NOPE.TXT\0");
+    assert!(!m.call(0x4300) && m.regs.ax == 2);
+}

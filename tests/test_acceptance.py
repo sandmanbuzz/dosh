@@ -112,6 +112,24 @@ def test_a_program_starts_children_and_resumes(dosh):
     assert exited(result) == 0
 
 
+def test_the_command_interpreter_runs_commands_and_programs(dosh):
+    guests = {n: (doshlab.GUESTS / n).read_bytes() for n in ("ARGS.COM", "EXIT42.COM")}
+    session = b"ver\recho  hi there\rtype note.txt\rargs a  b\rexit42\rnope\rdir\rexit\r"
+    result = dosh("COMMAND.COM", files={**guests, "NOTE.TXT": b"line one\r\n"}, stdin=[session])
+    out = result.consoles[0].decode()
+    for want in (
+        "DOSH DOS version 5.0\r\n",
+        "C:\\>echo  hi there\r\n hi there\r\n",  # ECHO keeps everything after one space
+        "line one\r\n",
+        "[ a  b]\r\n",
+        "Bad command or file name\r\n",
+        "ARGS.COM      ",  # DIR lists the files with their sizes
+        "NOTE.TXT      10\r\n",
+    ):
+        assert want in out, f"missing {want!r} in:\n{out}"
+    assert exited(result) == 0
+
+
 def test_dos_date_and_time_come_from_the_wall_clock(dosh):
     # The lab sets the virtual RTC to Monday 2031-02-03 12:00:00.
     result = dosh("DATE.COM")
