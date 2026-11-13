@@ -75,6 +75,12 @@ const MISC1: u32 = 0xF | 1 << 24 | 1 << 27 | 1 << 28 | 1 << 29 | 1 << 31;
 /// MWAIT, XSETBV.
 const MISC2: u32 = 0x7F | 1 << 9 | 1 << 10 | 1 << 11 | 1 << 13;
 
+/// VMCB virtual-interrupt word: a request pending (V_IRQ), TPR ignored so the
+/// request is taken at priority zero, and host ticks not masked by the guest.
+const V_IRQ: u64 = 1 << 8;
+const V_IGN_TPR: u64 = 1 << 20;
+const V_INTR_MASKING: u64 = 1 << 24;
+
 const EXIT_INTR: u64 = 0x60;
 const EXIT_NMI: u64 = 0x61;
 const EXIT_HLT: u64 = 0x78;
@@ -261,7 +267,7 @@ impl Hv {
         vm.set(vmcb::GUEST_ASID, 1u32);
         // V_INTR_MASKING: the guest's interrupt flag governs only its own
         // (virtual) interrupts. It cannot hold off the supervisor's.
-        vm.set(vmcb::VIRTUAL_INTERRUPT, 1u64 << 24);
+        vm.set(vmcb::VIRTUAL_INTERRUPT, V_INTR_MASKING);
         vm.set(vmcb::NESTED_CONTROL, 1u64);
         vm.set(vmcb::NESTED_CR3, base);
 
@@ -326,6 +332,18 @@ impl Vm {
 
     pub fn ram(&mut self) -> &mut [u8] {
         self.ram.bytes()
+    }
+
+    /// Ask the processor to deliver interrupt `vector` to the guest as soon
+    /// as the guest's interrupt flag allows. The processor clears the request
+    /// when it takes the interrupt.
+    pub fn post_interrupt(&mut self, vector: u8) {
+        self.set(vmcb::VIRTUAL_INTERRUPT, V_INTR_MASKING | V_IGN_TPR | V_IRQ | (vector as u64) << 32);
+    }
+
+    /// Whether a posted interrupt has not been taken yet.
+    pub fn interrupt_pending(&mut self) -> bool {
+        self.get::<u64>(vmcb::VIRTUAL_INTERRUPT) & V_IRQ != 0
     }
 
     /// Execute guest instructions on the processor until the guest needs the

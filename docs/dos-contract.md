@@ -39,11 +39,13 @@ and instructions are available. Port I/O reaches no devices: writes are
 discarded and reads return all ones. Control registers, MSRs and debug
 registers are off limits, and touching them faults the capsule.
 
-Nothing delivers hardware interrupts yet: no timer tick (`INT 08h`,
-`INT 1Ch`) and no keyboard interrupt. The BIOS clock is kept current in the
+The only hardware interrupt delivered is the clock tick, `INT 08h`. There is
+no keyboard interrupt yet. The BIOS clock is kept current in the
 BIOS data area (0040:006Ch, the tick count, and 0040:0070h, the midnight
-flag), and `INT 1Ah AH=00h` reads it. A `HLT` outside a service gate faults
-the capsule, because nothing would ever wake it.
+flag), and `INT 1Ah AH=00h` reads it. The clock tick is delivered as `INT 08h`
+to any program that has interrupts enabled, through the IVT. A `HLT` outside
+a service gate sleeps the program until the next tick, and faults if
+interrupts are disabled, because nothing would ever wake it.
 
 ## Program loading
 

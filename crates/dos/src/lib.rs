@@ -206,6 +206,9 @@ impl Dos {
                 mem.w8(firmware::BDA, 0x70, 0);
                 Outcome::Resume
             }
+            // The clock tick and the user tick hook. The supervisor keeps the
+            // BIOS clock itself, so the tick's own work is already done.
+            0x08 | 0x1C => Outcome::Resume,
             0x20 => Outcome::Exit(0),
             0x21 => self.int21(regs, mem, con),
             0x29 => {

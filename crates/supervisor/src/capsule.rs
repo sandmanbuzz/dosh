@@ -19,6 +19,10 @@ use crate::present::Endpoint;
 
 /// Space on a capsule's drive C: beyond the files it was provisioned with.
 const DISK_ROOM: usize = 4 << 20;
+/// The clock tick, delivered to the guest as the PC's IRQ 0: INT 08h.
+const TICK_VECTOR: u8 = 0x08;
+/// The processor's interrupt-enable flag.
+const FLAG_IF: u64 = 0x200;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -26,6 +30,8 @@ enum State {
     Running,
     /// The guest is inside a DOS call that needs console input.
     WaitingInput,
+    /// The guest executed HLT with interrupts enabled and waits for a tick.
+    Halted,
     Exited(u8),
     Faulted,
 }
@@ -43,6 +49,8 @@ pub struct Capsule {
     preemptions: u64,
     /// Port accesses that reached no device.
     stray_io: u64,
+    /// The clock tick count when the guest halted; a later count wakes it.
+    halted_at: u64,
 }
 
 fn regs_of(cpu: &Cpu) -> Regs {
@@ -116,6 +124,7 @@ impl Capsule {
             exits: 0,
             preemptions: 0,
             stray_io: 0,
+            halted_at: 0,
         };
         match loaded {
             Ok(regs) => {
@@ -131,7 +140,7 @@ impl Capsule {
     }
 
     pub fn is_live(&self) -> bool {
-        matches!(self.state, State::Running | State::WaitingInput)
+        matches!(self.state, State::Running | State::WaitingInput | State::Halted)
     }
 
     pub fn exit_code(&self) -> Option<u8> {
@@ -160,6 +169,12 @@ impl Capsule {
         // The clock advances whether or not the guest runs, so a capsule that
         // is waiting for input still sees midnight.
         self.dos.set_clock(&mut Mem::new(self.vm.ram()), timer::ticks());
+        if self.state == State::Halted && timer::ticks() != self.halted_at {
+            // The tick wakes the guest: the interrupt is taken after the HLT.
+            self.vm.cpu.rip = (self.vm.cpu.rip as u16).wrapping_add(1) as u64;
+            self.vm.post_interrupt(TICK_VECTOR);
+            self.state = State::Running;
+        }
         let ran = match self.state {
             State::Running => {
                 let exit = self.vm.run();
@@ -192,7 +207,10 @@ impl Capsule {
             }
             Exit::MemoryFault { address } => self.fault_here(format!("access to unmapped memory at {address:#x}")),
             Exit::Shutdown => self.fault_here("triple fault".into()),
-            Exit::Preempted => self.preemptions += 1,
+            Exit::Preempted => {
+                self.preemptions += 1;
+                self.vm.post_interrupt(TICK_VECTOR);
+            }
             Exit::Forbidden { code, info } => {
                 self.fault_here(format!("forbidden operation (exit code {code:#x}, info {info:#x})"))
             }
@@ -204,8 +222,7 @@ impl Capsule {
     fn service(&mut self) {
         let mut regs = regs_of(&self.vm.cpu);
         let Some(vector) = firmware::gate_vector(regs.cs, regs.ip) else {
-            // Nothing can interrupt a capsule yet, so HLT would never wake.
-            return self.fault_here("HLT with no interrupt source to wake it".into());
+            return self.guest_halt();
         };
         let mut mem = Mem::new(self.vm.ram());
         // The gate was entered by an interrupt, whose frame holds the address
@@ -238,6 +255,22 @@ impl Capsule {
                 self.fault(origin, what);
             }
         }
+    }
+
+    /// The guest executed HLT outside a service gate. With interrupts enabled
+    /// the next tick wakes it; with them disabled nothing ever would.
+    fn guest_halt(&mut self) {
+        if self.vm.cpu.rflags & FLAG_IF == 0 {
+            return self.fault_here("HLT with interrupts disabled".into());
+        }
+        if self.vm.interrupt_pending() {
+            // An interrupt is already posted, and interrupts are held off
+            // only for the instruction after STI: take it after this HLT.
+            self.vm.cpu.rip = (self.vm.cpu.rip as u16).wrapping_add(1) as u64;
+            return;
+        }
+        self.halted_at = timer::ticks();
+        self.state = State::Halted;
     }
 
     /// Stop the capsule for good, blaming the instruction the guest is at.

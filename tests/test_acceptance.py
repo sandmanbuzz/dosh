@@ -52,6 +52,19 @@ def test_a_program_sees_the_bios_tick_advance(dosh):
     assert exited(result) == 0
 
 
+def test_a_program_halts_until_the_clock_interrupts_it(dosh):
+    # INT 08h handler installed with AH=25h; HLT with IF=1 wakes on each tick.
+    result = dosh("IRQ.COM")
+    assert result.consoles[0] == b"IRQ OK\r\n"
+    assert exited(result) == 0
+
+
+
+def test_halt_with_interrupts_disabled_faults_with_a_reason(dosh):
+    """HLT with IF=0 could never be woken, so the capsule must say so."""
+    result = dosh("HLTCLI.COM")
+    assert faulted(result) == "HLT with interrupts disabled"
+
 def test_command_line_reaches_the_program(dosh):
     result = dosh("ARGS.COM one  two")
     assert result.consoles[0] == b"[ one  two]\r\n"
