@@ -452,3 +452,21 @@ def test_turbo_pascal_compiles_and_runs_a_program_started_from_the_shell(dosh):
     assert "Compiling" in screen and "hi from pascal" in screen, screen
     assert exited(result) == 0
     assert "WT.PAS" in result.files(), result.files()  # saved on the way out, through handle writes
+
+
+def test_a_program_built_by_a_compiler_in_the_capsule_runs_in_the_capsule(dosh):
+    """Turbo Pascal writes a .COM file; the shell then runs it. The compiler
+    is a guest of DOSH, and so is what it makes."""
+    files = {p.name: p.read_bytes() for p in (CORPUS / "early").iterdir()} if (CORPUS / "early").exists() else {}
+    corpus_file("early", "TURBO.COM")
+    files["COMMAND.COM"] = (doshlab.GUESTS / "COMMAND.COM").read_bytes()
+    # Options: compile to a Com-file; Compile; quit and save the source; run the result.
+    script = [
+        (b"", b"turbo\rnewt.pas\rbegin writeln('built here, run here') end.\x0bdocqc"),
+        (b"Code:", b"qywt\r"),
+        (b"built here, run here", b"exit\r"),
+    ]
+    result = dosh("COMMAND.COM", files=files, stdin=[script], timeout=60)
+    assert "built here, run here" in "\n".join(result.screen())
+    assert exited(result) == 0
+    assert {"WT.COM", "WT.PAS"} <= set(result.files()), result.files()
