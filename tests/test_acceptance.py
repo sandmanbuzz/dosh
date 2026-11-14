@@ -5,6 +5,7 @@ unmodified DOS executables in hardware-virtualized capsules, and checks what
 came out of the capsule consoles and what the supervisor reported.
 """
 
+import re
 import doshlab
 
 
@@ -705,6 +706,70 @@ def test_a_change_to_a_file_someone_else_changed_is_refused(dosh, tmp_path):
     assert len(result.find("storage", event="write")) == 1
     assert "changed by someone else since launch" in result.log
     assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x01"}
+
+
+def test_volumes_are_named_by_their_disks_and_kept_apart(dosh, tmp_path):
+    data = doshlab.make_disk(tmp_path / "data.img")
+    work = doshlab.make_disk(tmp_path / "work.img", name="WORK")
+    for boot in (1, 2):
+        result = dosh("COUNTER.COM", "vol=work COUNTER.COM", "vol=work COUNTER.COM", disk=[data, work])
+        result.one("storage", event="attach", volume="DATA")
+        result.one("storage", event="attach", volume="WORK")
+        assert result.consoles[0] == b"%03d" % boot
+    assert doshlab.read_disk_files(data) == {"COUNT.DAT": b"\x02"}
+    # The two capsules sharing WORK race for COUNT.DAT: one lands, one is refused.
+    assert doshlab.read_disk_files(work) == {"COUNT.DAT": b"\x02"}
+    assert len(result.find("storage", event="error")) == 1
+
+
+def test_a_capsule_without_a_volume_keeps_nothing_but_can_be_asked_for_its_files(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    result = dosh(
+        "vol=none COUNTER.COM",
+        disk=disk,
+        mgmt=[
+            ("capsule id=0 event=exit", "changes 0"),
+            ("cmd=changes status=ok count=1", "export 0 COUNT.DAT"),
+            ("cmd=export status=ok", "discard 0"),
+            ("cmd=discard status=ok", "changes 0"),
+            ("cmd=changes status=ok count=0", "export 0 COUNT.DAT"),
+            ("cmd=export status=error", "shutdown"),
+        ],
+    )
+    assert "mgmt item=change id=0 name=COUNT.DAT size=1" in result.log
+    assert "name=COUNT.DAT size=1 hex=01" in result.log
+    assert doshlab.read_disk_files(disk) == {}
+    assert not result.find("storage", event="write")
+
+
+def test_a_refused_change_can_be_collected(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    result = dosh(
+        "COUNTER.COM",
+        "COUNTER.COM",
+        disk=disk,
+        mgmt=[
+            ("someone else since launch", "changes 0"),
+            ("cmd=changes status=ok", "changes 1"),
+            ("cmd=changes status=ok", "shutdown"),
+        ],
+    )
+    counts = [int(n) for n in re.findall(r"cmd=changes status=ok count=(\d+)", result.log)]
+    assert sorted(counts) == [0, 1], "the loser holds what it could not land"
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x01"}
+
+
+def test_an_unknown_volume_is_refused_and_named(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    result = dosh(
+        "vol=nope COUNTER.COM",
+        disk=disk,
+        mgmt=[("mgmt event=ready", "launch vol=nope COUNTER.COM"), ("no volume NOPE", "put vol=nope A.TXT 41"), ("cmd=put status=error", "shutdown")],
+        stock=["COUNTER.COM"],
+    )
+    assert result.one("capsule", event="refused", reason="no volume NOPE")
+    assert "cmd=launch status=error reason=\"no volume NOPE\"" in result.log
+    assert doshlab.read_disk_files(disk) == {}
 
 
 # --- a persistent environment, reachable over TCP -------------------------

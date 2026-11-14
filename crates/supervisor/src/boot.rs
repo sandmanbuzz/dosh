@@ -25,9 +25,14 @@ const POOL_BYTES: usize = 64 << 20;
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::empty();
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct CapsuleSpec {
     /// CPU time the capsule may use, in seconds, before the supervisor stops it.
     pub cpu_limit: Option<u64>,
+    /// The persistent volume drive C: is kept on, upper case; `NONE` keeps
+    /// nothing. Unnamed means the default volume, if there is one. Once
+    /// launched, a capsule's is the volume it is on, or none.
+    pub volume: Option<String>,
     pub program: String,
     /// The command tail exactly as DOS would pass it, leading space included.
     pub tail: Vec<u8>,
@@ -104,17 +109,32 @@ fn read_esp() -> Result<Provision, String> {
             continue;
         }
         let rest = line.strip_prefix("run ").ok_or_else(|| format!("BOOT.CFG: unknown directive: {line}"))?;
-        let mut rest = rest.trim_start();
-        let mut cpu_limit = None;
-        while let Some(option) = rest.strip_prefix("limit=") {
-            let (seconds, after) = option.split_at(option.find(' ').unwrap_or(option.len()));
-            cpu_limit = Some(seconds.parse().map_err(|_| format!("BOOT.CFG: bad limit: {line}"))?);
-            rest = after.trim_start();
-        }
-        let (program, tail) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
-        capsules.push(CapsuleSpec { cpu_limit, program: program.to_string(), tail: tail.as_bytes().to_vec() });
+        capsules.push(parse_run(rest).map_err(|why| format!("BOOT.CFG: {why}: {line}"))?);
     }
     Ok(Provision { capsules, files, stay, shared_console, wall_clock: None, error: None })
+}
+
+/// A capsule's `[limit=SECONDS] [vol=NAME] PROGRAM [ARGUMENTS]`, as the
+/// manifest and the operator's `launch` both write it.
+pub fn parse_run(text: &str) -> Result<CapsuleSpec, String> {
+    let mut rest = text.trim_start();
+    let (mut cpu_limit, mut volume) = (None, None);
+    loop {
+        let (option, after) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
+        if let Some(seconds) = option.strip_prefix("limit=") {
+            cpu_limit = Some(seconds.parse().map_err(|_| "bad limit".to_string())?);
+        } else if let Some(name) = option.strip_prefix("vol=") {
+            volume = Some(name.to_ascii_uppercase());
+        } else {
+            break;
+        }
+        rest = after.trim_start();
+    }
+    if rest.is_empty() {
+        return Err("needs a program".to_string());
+    }
+    let (program, tail) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
+    Ok(CapsuleSpec { cpu_limit, volume, program: program.to_string(), tail: tail.as_bytes().to_vec() })
 }
 
 /// The end of the highest region of actual memory in the firmware's map.

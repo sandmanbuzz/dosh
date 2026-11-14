@@ -71,9 +71,18 @@ console line the shown capsule's endpoint is what hears Ctrl-].
 `dosh-fat` (`crates/fat`) is a small FAT16/FAT32 driver for the files in a
 root directory, over any `Block` device. `platform/virtio.rs` is the one
 block device: a polled virtio-blk driver on the legacy I/O-port interface,
-found by scanning PCI. The supervisor attaches the first such device whose
-FAT volume is labelled `DOSHDATA` (`storage.rs`) and leaves every other
-disk alone, so the firmware's boot disk is never touched.
+found by scanning PCI. The supervisor attaches every such device whose FAT
+volume is labelled `DOSH` plus a name (`storage.rs`): `DOSHDATA` is the volume
+`DATA`, `DOSHWORK` is `WORK` (names are A-Z, 0-9 and `_`; if two disks claim one name, the first in PCI order wins). It leaves every other disk alone, so the
+firmware's boot disk is never touched.
+
+A capsule is kept on one volume: `run vol=WORK PROGRAM` in `BOOT.CFG`, or
+`launch vol=WORK PROGRAM` from the operator. Unnamed is `DATA` if it is
+attached; `vol=NONE` keeps nothing. What a capsule changed and no volume took
+(everything, for `NONE`; the refused files, otherwise) is held with the
+capsule until the operator reads it with `changes ID` and `export ID NAME`
+and lets it go with `discard ID`; all capsules together hold at most 16 MiB, and past that a finishing capsule's changes are dropped and logged. A capsule that faults or is killed holds nothing. The operator's `files`, `put` and `get`
+take `vol=NAME` the same way; `put` is also how files are imported.
 
 The disk is the persistent half of drive C:. A capsule launched at any time
 finds the ESP's `\DOSH\C\` files with the disk's files laid over them. When

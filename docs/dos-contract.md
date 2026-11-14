@@ -147,10 +147,12 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
   handles 0–2 are the console; 3 and 4 (`AUX`, `PRN`) are null devices.
 - Twenty handles per process.
 - 4 MiB of space beyond the provisioned files.
-- Changes persist only if a disk labelled `DOSHDATA` is attached: when the
+- Changes persist only if the capsule is on a persistent volume (a disk
+  labelled `DOSH` plus a name; by default `DOSHDATA`): when the
   program exits, files it created or changed are written to the disk and
   files it deleted are removed from it. A program that faults, or is
-  killed, leaves the disk as it found it. A base-drive file a program
+  killed, leaves the disk as it found it, and nothing is held for the
+  operator. A base-drive file a program
   deletes stays deleted: the disk records it in `WHITEOUT.DSH`, a name
   programs can neither read nor write. A file is refused, and logged
   (`storage event=error ... reason="changed by someone else since

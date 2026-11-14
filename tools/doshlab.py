@@ -173,14 +173,14 @@ def build_disk(image: Path, manifest_text: str, files: dict[str, bytes]) -> None
         mtools("mcopy", str(path), f"::/DOSH/C/{path.name}")
 
 
-def make_disk(image: Path, files: dict[str, bytes] | None = None, megabytes: int = 16) -> Path:
-    """A persistent disk for the supervisor: FAT, labelled DOSHDATA, holding
-    `files`. The same image can be handed to run() any number of times; what
+def make_disk(image: Path, files: dict[str, bytes] | None = None, megabytes: int = 16, name: str = "DATA") -> Path:
+    """A persistent volume for the supervisor: FAT, labelled DOSH plus `name`
+    (DOSHDATA, the default volume, unless told otherwise), holding `files`. The same image can be handed to run() any number of times; what
     programs write to it survives from one boot to the next."""
     env = {**os.environ, "MTOOLS_SKIP_CHECK": "1"}
     with open(image, "wb") as f:
         f.truncate(megabytes << 20)
-    subprocess.run(["mformat", "-i", str(image), "-T", str(megabytes * 2048), "-v", "DOSHDATA", "::"], check=True, env=env)
+    subprocess.run(["mformat", "-i", str(image), "-T", str(megabytes * 2048), "-v", "DOSH" + name, "::"], check=True, env=env)
     for name, data in (files or {}).items():
         write_disk_file(image, name, data)
     return image
@@ -234,7 +234,7 @@ def run(
     attach: bool = False,
     nmi: bool = False,
     mux: bool = False,
-    disk: Path | None = None,
+    disk: Path | list[Path] | None = None,
     stay: bool | None = None,
     mgmt: list[tuple[str, str]] | None = None,
     stock: list[str] | None = None,
@@ -251,7 +251,7 @@ def run(
     `attach` connects capsule 0's console to this process's own terminal
     instead of capturing it (firmware output included, as on a real line).
     `nmi` injects one non-maskable interrupt once the first capsule has
-    started. `disk` attaches a persistent disk image (see make_disk). `mgmt`
+    started. `disk` attaches persistent disk images, one or a list (see make_disk). `mgmt`
     is a script for the management channel on COM1, as (wait_for, command)
     steps: each command goes out once `wait_for` has appeared in the
     supervisor log since the previous one, and giving one makes the
@@ -264,7 +264,7 @@ def run(
     for program in stock or []:
         files.setdefault(program, (GUESTS / program).read_bytes())
     for line in runs:
-        program = next(word for word in line.split() if not word.startswith("limit="))
+        program = next(word for word in line.split() if not word.startswith(("limit=", "vol=")))
         if (GUESTS / program).exists():
             files.setdefault(program, (GUESTS / program).read_bytes())
 
@@ -290,10 +290,10 @@ def run(
             "-device", "virtio-blk-pci,drive=esp",
             "-monitor", f"unix:{workdir / 'monitor.sock'},server,nowait",
         ]  # fmt: skip
-        if disk:
+        for n, image in enumerate([disk] if isinstance(disk, Path) else disk or []):
             cmd += [
-                "-drive", f"if=none,id=data,format=raw,file={disk}",
-                "-device", "virtio-blk-pci,drive=data,disable-modern=on,disable-legacy=off",
+                "-drive", f"if=none,id=data{n},format=raw,file={image}",
+                "-device", f"virtio-blk-pci,drive=data{n},disable-modern=on,disable-legacy=off",
             ]  # fmt: skip
         for i, (_, theirs) in enumerate(pairs):
             backend = "stdio,signal=off" if attach and i == 1 else f"socket,fd={theirs.fileno()}"

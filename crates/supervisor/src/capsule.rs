@@ -79,6 +79,10 @@ pub struct Capsule {
     screen_shown: bool,
     /// The provisioned files, to tell what the program changed.
     stocked: Files,
+    /// The persistent volume this capsule's drive C: is kept on, if any (as resolved at launch).
+    volume: Option<String>,
+    /// What the program changed that no volume took, until the operator collects it.
+    held: Changes,
     /// The clock tick at which the screen was last drawn.
     drawn_at: u64,
 }
@@ -172,6 +176,8 @@ impl Capsule {
             stray_io: 0,
             screen_shown: false,
             stocked,
+            volume: spec.volume.clone(),
+            held: Changes::default(),
             drawn_at: 0,
         };
         match loaded {
@@ -409,6 +415,22 @@ impl Capsule {
         changes
     }
 
+    pub fn volume(&self) -> Option<&str> {
+        self.volume.as_deref()
+    }
+
+    pub fn hold(&mut self, changes: Changes) {
+        self.held = changes;
+    }
+
+    pub fn held(&self) -> &Changes {
+        &self.held
+    }
+
+    pub fn discard(&mut self) {
+        self.held = Changes::default();
+    }
+
     /// The guest is halted at `cs:ip`. If that is a service gate, perform
     /// the service.
     fn service(&mut self) {
@@ -482,6 +504,13 @@ impl Capsule {
             at.1,
             self.exits
         );
+    }
+}
+
+impl Changes {
+    /// Bytes of file contents held.
+    pub fn bytes(&self) -> usize {
+        self.written.iter().map(|(_, data, _)| data.len()).sum()
     }
 }
 

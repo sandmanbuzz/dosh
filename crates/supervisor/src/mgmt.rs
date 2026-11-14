@@ -9,11 +9,15 @@
 //!
 //! ```text
 //! list                         every capsule: id, program, status
-//! launch [limit=SEC] PROGRAM [ARGS]
+//! launch [limit=SEC] [vol=NAME|NONE] PROGRAM [ARGS]
 //! suspend ID | resume ID | kill ID
-//! files                        the persistent disk's files
-//! put NAME HEX                 store a file on the persistent disk
-//! get NAME                     read one back, as hex
+//! files [vol=NAME]             a persistent volume's files
+//! put [vol=NAME] NAME HEX      store a file on a persistent volume
+//! get [vol=NAME] NAME          read one back, as hex
+//! changes ID                   what a finished capsule's program changed
+//!                              that no volume took (vol=NONE, or refused)
+//! export ID NAME               one of those files, as hex
+//! discard ID                   let go of them
 //! shutdown                     power off
 //! ```
 //!
@@ -22,6 +26,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::boot::{self, CapsuleSpec};
 use crate::platform::uart::Uart;
 
 /// The longest line accepted: a 256 KiB file in hex, and its command.
@@ -30,13 +35,16 @@ const MAX_LINE: usize = 600 << 10;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     List,
-    Launch { limit: Option<u64>, program: String, tail: Vec<u8> },
+    Launch(CapsuleSpec),
     Suspend(usize),
     Resume(usize),
     Kill(usize),
-    Files,
-    Put { name: String, data: Vec<u8> },
-    Get(String),
+    Files { volume: Option<String> },
+    Put { volume: Option<String>, name: String, data: Vec<u8> },
+    Get { volume: Option<String>, name: String },
+    Changes(usize),
+    Export { id: usize, name: String },
+    Discard(usize),
     Shutdown,
 }
 
@@ -100,34 +108,55 @@ pub fn parse(line: &str) -> Result<Command, String> {
         |command| if rest.is_empty() { Ok(command) } else { Err(alloc::format!("{verb} takes no arguments")) };
     match verb {
         "list" => no_args(Command::List),
-        "files" => no_args(Command::Files),
         "shutdown" => no_args(Command::Shutdown),
         "suspend" => Ok(Command::Suspend(parse_id(Some(rest))?)),
         "resume" => Ok(Command::Resume(parse_id(Some(rest))?)),
         "kill" => Ok(Command::Kill(parse_id(Some(rest))?)),
-        "launch" => {
-            let mut rest = rest;
-            let mut limit = None;
-            while let Some(option) = rest.strip_prefix("limit=") {
-                let (seconds, after) = option.split_at(option.find(' ').unwrap_or(option.len()));
-                limit = Some(seconds.parse().map_err(|_| "bad limit".to_string())?);
-                rest = after.trim_start();
-            }
+        "files" => {
+            let (volume, rest) = volume_option(rest);
             if rest.is_empty() {
-                return Err("launch needs a program".into());
+                Ok(Command::Files { volume })
+            } else {
+                Err("files takes no arguments".into())
             }
-            let (program, tail) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
-            Ok(Command::Launch { limit, program: program.to_string(), tail: tail.as_bytes().to_vec() })
         }
-        "get" if !rest.is_empty() && !rest.contains(' ') => Ok(Command::Get(rest.to_string())),
+        "launch" => Ok(Command::Launch(boot::parse_run(rest).map_err(|why| alloc::format!("launch {why}"))?)),
+        "changes" => Ok(Command::Changes(parse_id(Some(rest))?)),
+        "discard" => Ok(Command::Discard(parse_id(Some(rest))?)),
+        "export" => {
+            let (id, name) = rest.split_once(' ').unwrap_or((rest, ""));
+            if name.trim().is_empty() || name.trim().contains(' ') {
+                return Err("export needs a capsule id and one name".into());
+            }
+            Ok(Command::Export { id: parse_id(Some(id))?, name: name.trim().to_string() })
+        }
+        "get" => {
+            let (volume, name) = volume_option(rest);
+            if name.is_empty() || name.contains(' ') {
+                return Err("get needs one name".into());
+            }
+            Ok(Command::Get { volume, name: name.to_string() })
+        }
         "put" => {
+            let (volume, rest) = volume_option(rest);
             let (name, hex) = rest.split_once(' ').unwrap_or((rest, ""));
             if name.is_empty() {
                 return Err("put needs a name and the contents in hex".into());
             }
-            Ok(Command::Put { name: name.to_string(), data: from_hex(hex.trim())? })
+            Ok(Command::Put { volume, name: name.to_string(), data: from_hex(hex.trim())? })
         }
         _ => Err(alloc::format!("unknown command: {verb}")),
+    }
+}
+
+/// A leading `vol=NAME`, and what follows it.
+fn volume_option(rest: &str) -> (Option<String>, &str) {
+    match rest.strip_prefix("vol=") {
+        Some(after) => {
+            let (name, tail) = after.split_at(after.find(' ').unwrap_or(after.len()));
+            (Some(name.to_ascii_uppercase()), tail.trim_start())
+        }
+        None => (None, rest),
     }
 }
 

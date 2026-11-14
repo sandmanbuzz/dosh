@@ -6,7 +6,7 @@
 //! drive; the disk's files lay over it. The disk is the supervisor's alone.
 
 use alloc::rc::Rc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use dosh_fat::{Error, Volume};
@@ -19,7 +19,10 @@ use crate::platform::virtio::{self, VirtioBlk};
 /// Files by name, their contents shared by everything stocked from them.
 pub type Files = Vec<(String, Rc<[u8]>)>;
 
-pub const LABEL: &str = "DOSHDATA";
+/// A disk labelled `DOSH` followed by a name is the persistent volume of
+/// that name: `DOSHDATA` is `DATA`, the one capsules get unless told otherwise.
+const PREFIX: &str = "DOSH";
+pub const DEFAULT: &str = "DATA";
 
 /// The disk's own bookkeeping: base-drive files a program deleted, one name
 /// per line. Without it a deleted base file would reappear at the next
@@ -27,6 +30,7 @@ pub const LABEL: &str = "DOSHDATA";
 const WHITEOUTS: &str = "WHITEOUT.DSH";
 
 pub struct Disk {
+    name: String,
     volume: Volume<VirtioBlk>,
     whiteouts: Vec<String>,
     /// Whether `whiteouts` has changes not yet on the disk; retried until saved.
@@ -34,8 +38,10 @@ pub struct Disk {
 }
 
 impl Disk {
-    /// Find the persistent disk among the machine's block devices.
-    pub fn find() -> Option<Self> {
+    /// Every persistent volume among the machine's block devices. Disks
+    /// that are not ours, or whose name is taken, are left alone.
+    pub fn find_all() -> Vec<Self> {
+        let mut found: Vec<Self> = Vec::new();
         for function in pci::scan(8) {
             if function.ids() != (virtio::VENDOR, virtio::DEVICE_BLOCK) {
                 continue;
@@ -53,20 +59,36 @@ impl Disk {
                 }
             };
             match Volume::open(dev) {
-                Ok(volume) if volume.label() == LABEL => {
-                    log!("storage event=attach label={LABEL}");
-                    let mut disk = Self { volume, whiteouts: Vec::new(), dirty: false };
+                Ok(volume) => {
+                    let label = volume.label().to_string();
+                    let Some(name) = label.strip_prefix(PREFIX).filter(|n| !n.is_empty() && *n != "NONE") else {
+                        log!("storage event=skip label=\"{label}\" reason=\"not a {PREFIX} volume\"");
+                        continue;
+                    };
+                    if !name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+                        log!("storage event=skip label=\"{label}\" reason=\"volume names are A-Z, 0-9 and _\"");
+                        continue;
+                    }
+                    if found.iter().any(|d| d.name == name) {
+                        log!("storage event=skip label=\"{label}\" reason=\"volume {name} is already attached\"");
+                        continue;
+                    }
+                    log!("storage event=attach label={label} volume={name}");
+                    let mut disk = Self { name: name.to_string(), volume, whiteouts: Vec::new(), dirty: false };
                     disk.whiteouts = match disk.volume.read(WHITEOUTS) {
                         Ok(Some(list)) => String::from_utf8_lossy(&list).lines().map(String::from).collect(),
                         _ => Vec::new(),
                     };
-                    return Some(disk);
+                    found.push(disk);
                 }
-                Ok(volume) => log!("storage event=skip label=\"{}\" reason=\"not {LABEL}\"", volume.label()),
                 Err(e) => log!("storage event=skip reason=\"{}\"", describe(&e)),
             }
         }
-        None
+        found
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Every file on the disk, or none at all if it cannot be read.
@@ -118,23 +140,28 @@ impl Disk {
     /// (another capsule got there first), when the disk cannot take it (a
     /// name it cannot hold, no room), or when it names the disk's own
     /// bookkeeping; the others still land.
-    pub fn store(&mut self, capsule: usize, changes: &Changes, base: &Files) {
+    /// Returns what it refused, for the operator to collect.
+    pub fn store(&mut self, capsule: usize, changes: &Changes, base: &Files) -> Changes {
+        let mut refused = Changes::default();
         let error = |op: &str, name: &str, why: &str| {
             log!("storage event=error op={op} capsule={capsule} name={name} reason=\"{why}\"")
         };
         for (name, data, was) in &changes.written {
             if name == WHITEOUTS {
                 error("write", name, "name is reserved");
+                refused.written.push((name.clone(), data.clone(), was.clone()));
                 continue;
             }
             match self.current(name, base) {
                 Ok(now) if now.as_deref() == was.as_deref() => {}
                 Ok(_) => {
                     error("write", name, "changed by someone else since launch");
+                    refused.written.push((name.clone(), data.clone(), was.clone()));
                     continue;
                 }
                 Err(e) => {
                     error("write", name, &describe(&e));
+                    refused.written.push((name.clone(), data.clone(), was.clone()));
                     continue;
                 }
             }
@@ -143,7 +170,10 @@ impl Disk {
                     self.set_whiteout(name, false);
                     log!("storage event=write capsule={capsule} name={name} size={}", data.len())
                 }
-                Err(e) => error("write", name, &describe(&e)),
+                Err(e) => {
+                    error("write", name, &describe(&e));
+                    refused.written.push((name.clone(), data.clone(), was.clone()));
+                }
             }
         }
         for (name, was) in &changes.deleted {
@@ -152,10 +182,12 @@ impl Disk {
                 Ok(Some(now)) if now == *was => {}
                 Ok(Some(_)) => {
                     error("delete", name, "changed by someone else since launch");
+                    refused.deleted.push((name.clone(), was.clone()));
                     continue;
                 }
                 Err(e) => {
                     error("delete", name, &describe(&e));
+                    refused.deleted.push((name.clone(), was.clone()));
                     continue;
                 }
             }
@@ -168,12 +200,16 @@ impl Disk {
                         log!("storage event=delete capsule={capsule} name={name}");
                     }
                 }
-                Err(e) => error("delete", name, &describe(&e)),
+                Err(e) => {
+                    error("delete", name, &describe(&e));
+                    refused.deleted.push((name.clone(), was.clone()));
+                }
             }
         }
         if let Err(e) = self.save_whiteouts() {
             error("write", WHITEOUTS, &describe(&e));
         }
+        refused
     }
 
     /// What a capsule launched now would find under `name`: the disk's
