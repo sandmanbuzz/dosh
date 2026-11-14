@@ -805,3 +805,41 @@ fn the_root_is_the_only_directory() {
     path(&mut m, b"NOPE.TXT\0");
     assert!(!m.call(0x4300) && m.regs.ax == 2);
 }
+
+#[test]
+fn names_are_what_the_disk_can_hold() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    let ds = m.regs.ds;
+    let create = |m: &mut Machine, s: &[u8]| {
+        m.mem().write(ds, 0x200, s);
+        m.regs.dx = 0x200;
+        m.regs.cx = 0;
+        let ok = m.call(0x3C00);
+        if ok {
+            m.regs.bx = m.regs.ax;
+            assert!(m.call(0x3E00));
+        }
+        ok
+    };
+    assert!(create(&mut m, b"longfilename.text\0"), "DOS cuts an over-long name");
+    assert!(m.dos.volume().get("LONGFILE.TEX").is_some());
+    for bad in [&b"a*b.txt\0"[..], b"a?.txt\0", b"a b.txt\0", b"a.b.c\0", b".txt\0", b"a;b\0", b"a\"b\0"] {
+        assert!(!create(&mut m, bad), "{:?}", String::from_utf8_lossy(bad));
+        assert_eq!(m.regs.ax, 3);
+    }
+    assert_eq!(m.dos.volume().names().count(), 2, "only P.COM and the cut name exist");
+}
+
+#[test]
+fn free_space_is_reported_in_clusters() {
+    let mut m = Machine::boot(&[("P.COM", &[0xC3])], "P.COM", b"").unwrap();
+    m.regs.dx = 0;
+    assert!(m.call(0x3600));
+    let (spc, bps) = (m.regs.ax as usize, m.regs.cx as usize);
+    assert_eq!((m.regs.bx as usize) * spc * bps, m.dos.volume().free() / (spc * bps) * spc * bps);
+    assert_eq!(m.regs.dx as usize, (1 << 20) / (spc * bps), "total clusters");
+    m.regs.dx = 4;
+    m.regs.ax = 0x3600;
+    assert_eq!(m.int21().0, Outcome::Resume);
+    assert_eq!(m.regs.ax, 0xFFFF, "no such drive");
+}

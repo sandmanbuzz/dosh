@@ -30,6 +30,11 @@ impl Volume {
         Self { files: Vec::new(), capacity }
     }
 
+    /// Bytes the volume holds when full.
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Bytes programs can still write before the disk is full.
     pub fn free(&self) -> usize {
         let used: usize = self.files.iter().flatten().map(|(_, data, _)| data.len()).sum();
@@ -108,6 +113,17 @@ pub(crate) enum Target {
 }
 
 pub(crate) fn resolve(raw: &[u8]) -> Result<Target, u16> {
+    parse(raw, false)
+}
+
+/// Like [`resolve`], but `*` and `?` are allowed: the path is a search pattern.
+pub(crate) fn resolve_pattern(raw: &[u8]) -> Result<Target, u16> {
+    parse(raw, true)
+}
+
+/// A file name is what the disk can hold: 8.3, upper case, no separators or
+/// punctuation FAT reserves. Like DOS, an over-long part is cut, not refused.
+fn parse(raw: &[u8], wild: bool) -> Result<Target, u16> {
     let mut path = raw;
     if path.len() >= 2 && path[1] == b':' {
         if !path[0].eq_ignore_ascii_case(&b'C') {
@@ -126,11 +142,19 @@ pub(crate) fn resolve(raw: &[u8]) -> Result<Target, u16> {
         return Err(ERR_FILE_NOT_FOUND);
     }
     // Device names win over files, with or without an extension.
-    Ok(match name.split('.').next().unwrap_or("").trim_end_matches(':') {
-        "CON" => Target::Console,
-        "NUL" => Target::Null,
-        _ => Target::File(name),
-    })
+    match name.split('.').next().unwrap_or("").trim_end_matches(':') {
+        "CON" => return Ok(Target::Console),
+        "NUL" => return Ok(Target::Null),
+        _ => {}
+    }
+    let (stem, ext) = name.split_once('.').unwrap_or((&name, ""));
+    let bad = |b: char| !b.is_ascii_graphic() || "\"+,/:;<=>[\\]|.".contains(b) || (!wild && matches!(b, '*' | '?'));
+    if stem.is_empty() || stem.chars().chain(ext.chars()).any(bad) {
+        return Err(ERR_PATH_NOT_FOUND);
+    }
+    let cut = |s: &str, n: usize| s.chars().take(n).collect::<String>();
+    let (stem, ext) = (cut(stem, 8), cut(ext, 3));
+    Ok(Target::File(if ext.is_empty() { stem } else { alloc::format!("{stem}.{ext}") }))
 }
 
 #[derive(Clone, Copy)]

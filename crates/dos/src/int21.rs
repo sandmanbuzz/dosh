@@ -356,7 +356,7 @@ impl Dos {
     /// pattern in bytes 1-11, the next slot to look at in bytes 12-13.
     fn find_first(&mut self, r: &mut Regs, mem: &mut Mem) -> DosResult {
         let path = path_at(mem, r.ds, r.dx);
-        let name = match files::resolve(&path)? {
+        let name = match files::resolve_pattern(&path)? {
             Target::File(name) => name,
             _ => return Err(files::ERR_FILE_NOT_FOUND),
         };
@@ -383,7 +383,7 @@ impl Dos {
 
     fn rename(&mut self, r: &Regs, mem: &Mem) -> DosResult {
         let (Target::File(from), Target::File(to)) =
-            (files::resolve(&path_at(mem, r.ds, r.dx))?, files::resolve(&path_at(mem, r.es, r.di))?)
+            (files::resolve_pattern(&path_at(mem, r.ds, r.dx))?, files::resolve_pattern(&path_at(mem, r.es, r.di))?)
         else {
             return Err(files::ERR_ACCESS_DENIED); // devices cannot be renamed, or be a name
         };
@@ -613,6 +613,20 @@ impl Dos {
                 Ok(())
             }
             0x47 => Err(ERR_INVALID_DRIVE),
+            0x36 if matches!(r.dl(), 0 | 3) => {
+                // Space in clusters of 4 KiB: 8 sectors of 512 bytes.
+                const CLUSTER: usize = 4096;
+                let total = (self.volume.capacity() / CLUSTER).min(0xFFFF);
+                r.ax = 8;
+                r.bx = (self.volume.free() / CLUSTER).min(total) as u16;
+                r.cx = 512;
+                r.dx = total as u16;
+                Ok(())
+            }
+            0x36 => {
+                r.ax = 0xFFFF; // no such drive; carry is not used
+                return Outcome::Resume;
+            }
             0x41 => match files::resolve(&path_at(mem, r.ds, r.dx)) {
                 Ok(Target::File(name)) => match self.volume.slot(&name) {
                     Some(slot) => {
