@@ -81,8 +81,15 @@ a program exits (not when it faults or is killed) the files it created or
 changed are written to the disk and the ones it deleted are removed from
 it, and the supervisor logs each (`storage event=write ...`). The disk is
 synchronous: when the log line appears the data has been handed to the
-device. Two capsules that change the same file race, and the last to exit
-wins.
+device. Capsule files are shared with what stocked them (the ESP seed and a
+snapshot of the disk, rebuilt when the disk changes) and copied only when a
+program first writes one. Two capsules that change the same file do not
+race: the first to exit lands, and the other's change is refused and
+logged, since it started from contents that are gone. A program that deletes
+a base-drive file leaves a whiteout on the disk (`WHITEOUT.DSH`, kept by
+`storage.rs`, hidden from capsules) so the seed, which is never written, does
+not bring it back. A capsule's room to grow is capped by the disk's free
+space.
 
 Legacy virtio rather than modern because the legacy registers are in an
 I/O BAR, in the first 64 KiB of port space, whereas a modern device's are
@@ -306,8 +313,8 @@ local display instead of a terminal means rendering the same `Snapshot`.
   running forever, though it cannot starve the others; use `limit=`.
 - The management channel has no authentication. Whoever reaches COM1
   operates the machine.
-- Every launch copies the base drive and the disk's files into the new
-  capsule, so a large disk costs memory per live capsule (at most 24).
+- The disk's files are read into memory once per change, and capsules share
+  them until written; a program that rewrites a big file still copies it.
 - The display is text mode only: one page, modes 2 and 3, no graphics and
   no blink or intensity distinction beyond what ANSI gives.
 - Console input is polled once per slice; a serial peer sending faster

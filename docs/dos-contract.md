@@ -98,6 +98,7 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 | 2Ah, 2Ch | Get date, get time | From the firmware's clock as it read when the supervisor started, advanced by elapsed time; 1980-01-01 00:00:00 if the firmware has none. Hundredths are the supervisor tick. Set date and set time (2Bh, 2Dh) fault by name. |
 | 30h | DOS version | 5.00. |
 | 39h, 3Ah | Make, remove directory | Access denied: there are no subdirectories. |
+| 36h | Get free disk space | Drive C: (DL=0 or 3). Clusters of 8 sectors of 512 bytes, counted from the volume's room; another drive answers AX=FFFFh. |
 | 3Bh, 47h | Change, get current directory | The root is the only directory: changing to it succeeds, anything else is path not found; the current directory is the empty string. |
 | 3Ch | Create file | Truncates an existing file. Attributes are ignored. |
 | 3Dh | Open file | Access mode honoured; sharing bits ignored. |
@@ -138,6 +139,10 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
   capsule starts with its own copy of the provisioned files.
 - Names are case-insensitive. `C:` and a leading `\` are accepted; any
   other drive or any subdirectory is "path not found".
+- Names are 8.3, as the disk holds them. A longer name or extension is cut
+  (`LONGFILENAME.TEXT` is `LONGFILE.TEX`), as DOS does. A space, a wildcard
+  (outside find and rename) or any of `"+,/:;<=>[]|` is "path not found". Two
+  long names that cut to the same 8.3 name are one file, as under DOS.
 - `CON` and `NUL` are devices, with or without an extension. Standard
   handles 0–2 are the console; 3 and 4 (`AUX`, `PRN`) are null devices.
 - Twenty handles per process.
@@ -145,8 +150,13 @@ Errors are reported as DOS does: carry set and the error code in `AX`.
 - Changes persist only if a disk labelled `DOSHDATA` is attached: when the
   program exits, files it created or changed are written to the disk and
   files it deleted are removed from it. A program that faults, or is
-  killed, leaves the disk as it found it. Names that do not fit 8.3 cannot
-  be stored and are reported in the log. The boot volume is never written.
+  killed, leaves the disk as it found it. A base-drive file a program
+  deletes stays deleted: the disk records it in `WHITEOUT.DSH`, a name
+  programs can neither read nor write. A file is refused, and logged
+  (`storage event=error ... reason="changed by someone else since
+  launch"`), when another capsule changed it after this one launched. A
+  program can write no more than the disk has room for. The boot volume is
+  never written.
 
 ## The console
 

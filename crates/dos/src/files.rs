@@ -1,5 +1,6 @@
 //! Drive C: and the file handles open on it.
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -19,8 +20,24 @@ const EPOCH: Stamp = (0, 0x0021);
 /// A capsule's drive C:. One flat root directory held in memory; names are
 /// stored upper-case, as DOS presents them.
 pub struct Volume {
-    files: Vec<Option<(String, Vec<u8>, Stamp)>>,
+    files: Vec<Option<(String, Data, Stamp)>>,
     capacity: usize,
+}
+
+/// A file's contents. Stocked files are shared with whoever stocked them,
+/// and copied only when a program first writes to one.
+enum Data {
+    Shared(Rc<[u8]>),
+    Owned(Vec<u8>),
+}
+
+impl Data {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Data::Shared(data) => data,
+            Data::Owned(data) => data,
+        }
+    }
 }
 
 impl Volume {
@@ -37,13 +54,28 @@ impl Volume {
 
     /// Bytes programs can still write before the disk is full.
     pub fn free(&self) -> usize {
-        let used: usize = self.files.iter().flatten().map(|(_, data, _)| data.len()).sum();
+        let used: usize = self.files.iter().flatten().map(|(_, data, _)| data.bytes().len()).sum();
         self.capacity.saturating_sub(used)
     }
 
     /// Add or replace a file, regardless of capacity: this is the operator
     /// stocking the disk, not a program writing to it. Returns its slot.
     pub fn put(&mut self, name: &str, data: Vec<u8>) -> usize {
+        self.insert(name, Data::Owned(data))
+    }
+
+    /// Like [`put`](Self::put), sharing `data` instead of copying it.
+    pub fn put_shared(&mut self, name: &str, data: Rc<[u8]>) -> usize {
+        self.insert(name, Data::Shared(data))
+    }
+
+    /// Whether the file is still the very contents it was stocked with:
+    /// no program has opened it for writing since.
+    pub fn untouched(&self, name: &str) -> bool {
+        self.slot(name).is_some_and(|slot| matches!(self.files[slot], Some((_, Data::Shared(_), _))))
+    }
+
+    fn insert(&mut self, name: &str, data: Data) -> usize {
         let entry = Some((name.to_ascii_uppercase(), data, EPOCH));
         match self.slot(name) {
             Some(slot) => {
@@ -67,7 +99,7 @@ impl Volume {
 
     /// The first file at or after slot `from`: its slot, name and size.
     pub(crate) fn next_from(&self, from: usize) -> Option<(usize, &str, usize)> {
-        (from..self.files.len()).find_map(|i| self.files[i].as_ref().map(|(n, d, _)| (i, n.as_str(), d.len())))
+        (from..self.files.len()).find_map(|i| self.files[i].as_ref().map(|(n, d, _)| (i, n.as_str(), d.bytes().len())))
     }
 
     pub(crate) fn stamp(&self, slot: usize) -> Stamp {
@@ -95,12 +127,19 @@ impl Volume {
     }
 
     pub(crate) fn data(&self, slot: usize) -> &[u8] {
-        self.files[slot].as_ref().map_or(&[], |(_, data, _)| data)
+        self.files[slot].as_ref().map_or(&[], |(_, data, _)| data.bytes())
     }
 
     /// The contents of an open file; `None` once it has been deleted.
     pub(crate) fn data_mut(&mut self, slot: usize) -> Option<&mut Vec<u8>> {
-        self.files[slot].as_mut().map(|(_, data, _)| data)
+        let (_, data, _) = self.files[slot].as_mut()?;
+        if let Data::Shared(shared) = data {
+            *data = Data::Owned(shared.to_vec());
+        }
+        match data {
+            Data::Owned(data) => Some(data),
+            Data::Shared(_) => unreachable!("just made owned"),
+        }
     }
 }
 

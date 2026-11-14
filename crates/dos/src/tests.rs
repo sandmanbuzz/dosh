@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use alloc::rc::Rc;
+
 use crate::*;
 
 #[derive(Default)]
@@ -842,4 +844,18 @@ fn free_space_is_reported_in_clusters() {
     m.regs.ax = 0x3600;
     assert_eq!(m.int21().0, Outcome::Resume);
     assert_eq!(m.regs.ax, 0xFFFF, "no such drive");
+}
+
+#[test]
+fn stocked_files_are_shared_until_written() {
+    let seed: Rc<[u8]> = Rc::from(&b"seed"[..]);
+    let mut volume = Volume::new(1 << 20);
+    volume.put_shared("A.TXT", seed.clone());
+    assert!(volume.untouched("a.txt"));
+    assert_eq!(volume.get("A.TXT"), Some(&b"seed"[..]));
+    assert!(volume.untouched("A.TXT"), "reading does not copy");
+    volume.data_mut(volume.slot("A.TXT").unwrap()).unwrap().push(b'!');
+    assert!(!volume.untouched("A.TXT"));
+    assert_eq!(volume.get("A.TXT"), Some(&b"seed!"[..]));
+    assert_eq!(&*seed, b"seed", "the seed is not changed");
 }

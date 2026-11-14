@@ -27,6 +27,7 @@ mod platform;
 mod present;
 mod storage;
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -82,7 +83,8 @@ fn supervise(provision: boot::Provision) -> ! {
 
     let mut fleet = Fleet {
         hv,
-        base: provision.files,
+        base: provision.files.into_iter().map(|(name, data)| (name, Rc::from(data))).collect(),
+        stock: None,
         disk: storage::Disk::find(),
         wall_clock: provision.wall_clock,
         shared: provision.shared_console,
@@ -126,7 +128,9 @@ fn supervise(provision: boot::Provision) -> ! {
 /// Everything the supervisor runs: the capsules, and what they are stocked from.
 struct Fleet {
     hv: Option<hv::Hv>,
-    base: Vec<(String, Vec<u8>)>,
+    base: storage::Files,
+    /// What a capsule launched now is stocked with; dropped when the disk changes.
+    stock: Option<storage::Files>,
     disk: Option<storage::Disk>,
     wall_clock: Option<dosh_dos::DateTime>,
     shared: bool,
@@ -140,10 +144,24 @@ const MAX_LIVE: usize = 24;
 impl Fleet {
     /// The files a capsule launched now finds on C:: the base drive, with the
     /// persistent disk laid over it.
-    fn stock(&mut self) -> Vec<(String, Vec<u8>)> {
+    fn stock(&mut self) -> storage::Files {
+        if let Some(files) = &self.stock {
+            return files.clone();
+        }
         let mut files = self.base.clone();
+        let mut complete = true;
         if let Some(disk) = self.disk.as_mut() {
-            files.extend(disk.files());
+            let on_disk = disk.files();
+            complete = on_disk.is_some();
+            let on_disk = on_disk.unwrap_or_default();
+            // One entry per name: the disk's file replaces the base drive's.
+            files.retain(|(name, _)| {
+                !disk.is_whiteout(name) && !on_disk.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+            });
+            files.extend(on_disk);
+        }
+        if complete {
+            self.stock = Some(files.clone()); // an unreadable disk is not remembered
         }
         files
     }
@@ -151,9 +169,11 @@ impl Fleet {
     fn launch(&mut self, spec: boot::CapsuleSpec) -> Option<usize> {
         let id = self.capsules.len();
         let files = self.stock();
+        // A program may not write more than the disk could keep.
+        let room = self.disk.as_mut().map_or(capsule::DISK_ROOM, |d| d.free().min(capsule::DISK_ROOM as u64) as usize);
         let hv = self.hv.as_ref()?;
         let endpoint = present::Endpoint::for_capsule(id, self.shared);
-        self.capsules.push(Capsule::launch(id, hv, spec, files, endpoint, self.wall_clock));
+        self.capsules.push(Capsule::launch(id, hv, spec, files, room, endpoint, self.wall_clock));
         Some(id)
     }
 
@@ -171,7 +191,8 @@ impl Fleet {
                 if capsule.exit_code().is_some() {
                     let changes = capsule.changes();
                     if let Some(disk) = self.disk.as_mut() {
-                        disk.store(capsule.id(), &changes);
+                        disk.store(capsule.id(), &changes, &self.base);
+                        self.stock = None;
                     }
                 }
                 capsule.retire();
@@ -190,7 +211,7 @@ impl Fleet {
                 log!("mgmt cmd=list status=ok count={}", self.capsules.len());
             }
             Launch { limit, program, tail } => {
-                let known = |files: &[(String, Vec<u8>)]| files.iter().any(|(n, _)| n.eq_ignore_ascii_case(&program));
+                let known = |files: &[(String, Rc<[u8]>)]| files.iter().any(|(n, _)| n.eq_ignore_ascii_case(&program));
                 let live = self.capsules.iter().filter(|c| !c.is_retired()).count();
                 if self.hv.is_none() {
                     log!("mgmt cmd=launch status=error reason=\"no hardware virtualization\"");
@@ -209,7 +230,9 @@ impl Fleet {
                 let Some(disk) = self.disk.as_mut() else {
                     return log!("mgmt cmd=files status=error reason=\"no persistent disk\"");
                 };
-                let files = disk.files();
+                let Some(files) = disk.files() else {
+                    return log!("mgmt cmd=files status=error reason=\"disk unreadable\"");
+                };
                 for (name, data) in &files {
                     log!("mgmt item=file name={name} size={}", data.len());
                 }
@@ -219,6 +242,7 @@ impl Fleet {
                 let Some(disk) = self.disk.as_mut() else {
                     return log!("mgmt cmd=put status=error reason=\"no persistent disk\"");
                 };
+                self.stock = None;
                 match disk.put(&name, &data) {
                     Ok(()) => log!("mgmt cmd=put status=ok name={name} size={}", data.len()),
                     Err(why) => log!("mgmt cmd=put status=error reason=\"{why}\""),

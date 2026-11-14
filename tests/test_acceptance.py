@@ -656,6 +656,57 @@ def test_a_disk_that_is_not_ours_is_left_alone(dosh, tmp_path):
     assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x05"}
 
 
+def test_a_deleted_base_file_stays_deleted(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    base = {"NOTES.TXT": b"from the seed"}
+    result = dosh("DEL.COM notes.txt", disk=disk, files=base)
+    assert exited(result) == 0
+    result.one("storage", event="delete", capsule="0", name="NOTES.TXT")
+    result = dosh("TYPE.COM notes.txt", disk=disk, files=base)
+    assert exited(result) == 2 and result.consoles[0] == b"File not found\r\n"
+    # Writing the name again brings it back, and the bookkeeping goes away.
+    result = dosh("TOUCH.COM notes.txt", disk=disk, files=base)
+    assert exited(result) == 0
+    assert "WHITEOUT.DSH" not in doshlab.read_disk_files(disk)
+    result = dosh("TYPE.COM notes.txt", disk=disk, files=base)
+    assert exited(result) == 0
+
+
+def test_a_base_file_a_program_keeps_changing_keeps_changing(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    for boot in (6, 7, 8):
+        result = dosh("COUNTER.COM", disk=disk, files={"COUNT.DAT": b"\x05"})
+        assert result.consoles[0] == b"%03d" % boot
+        assert not result.find("storage", event="error")
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x08"}
+
+
+def test_a_program_cannot_touch_the_disks_bookkeeping(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    result = dosh("TOUCH.COM whiteout.dsh", disk=disk)
+    assert exited(result) == 0
+    assert "reason=\"name is reserved\"" in result.log
+    assert doshlab.read_disk_files(disk) == {}
+
+
+def test_a_long_name_is_cut_to_8_3_and_stored_so(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    result = dosh("TOUCH.COM longfilename.text", disk=disk)
+    assert exited(result) == 0
+    assert doshlab.read_disk_files(disk) == {"LONGFILE.TEX": b""}
+    result = dosh("TOUCH.COM a*b.txt", disk=disk)
+    assert exited(result) == 3
+
+
+def test_a_change_to_a_file_someone_else_changed_is_refused(dosh, tmp_path):
+    disk = doshlab.make_disk(tmp_path / "data.img")
+    result = dosh("COUNTER.COM", "COUNTER.COM", disk=disk)
+    assert exited(result, 0) == 1 and exited(result, 1) == 1
+    assert len(result.find("storage", event="write")) == 1
+    assert "changed by someone else since launch" in result.log
+    assert doshlab.read_disk_files(disk) == {"COUNT.DAT": b"\x01"}
+
+
 # --- a persistent environment, reachable over TCP -------------------------
 
 

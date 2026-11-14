@@ -6,6 +6,7 @@
 //! us, deal with the reason, and say whether it may run again.
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -17,9 +18,10 @@ use crate::hv::{self, Cpu, Exit, Segment};
 use crate::log;
 use crate::platform::{self, timer};
 use crate::present::Endpoint;
+use crate::storage::Files;
 
 /// Space on a capsule's drive C: beyond the files it was provisioned with.
-const DISK_ROOM: usize = 4 << 20;
+pub const DISK_ROOM: usize = 4 << 20;
 /// The clock tick, delivered to the guest as the PC's IRQ 0: INT 08h.
 const TICK_VECTOR: u8 = firmware::TIMER_VECTOR as u8;
 /// The processor's interrupt-enable flag.
@@ -75,8 +77,8 @@ pub struct Capsule {
     tick_budget: Option<u64>,
     /// Whether the endpoint has switched from the byte stream to the screen.
     screen_shown: bool,
-    /// The provisioned files, by name and content hash, to tell what the program changed.
-    stocked: Vec<(String, u32)>,
+    /// The provisioned files, to tell what the program changed.
+    stocked: Files,
     /// The clock tick at which the screen was last drawn.
     drawn_at: u64,
 }
@@ -134,17 +136,18 @@ impl Capsule {
         id: usize,
         hv: &hv::Hv,
         spec: CapsuleSpec,
-        files: Vec<(String, Vec<u8>)>,
+        files: Files,
+        room: usize,
         endpoint: Endpoint,
         wall_clock: Option<DateTime>,
     ) -> Self {
         let mut vm = hv.create_vm(RAM_SIZE);
-        let stocked: usize = files.iter().map(|(_, data)| data.len()).sum();
-        let mut volume = Volume::new(stocked + DISK_ROOM);
-        for (name, data) in files {
-            volume.put(&name, data);
+        let size: usize = files.iter().map(|(_, data)| data.len()).sum();
+        let mut volume = Volume::new(size + room);
+        for (name, data) in &files {
+            volume.put_shared(name, data.clone());
         }
-        let stocked = volume.names().map(|n| (n.to_string(), fnv1a(volume.get(n).unwrap_or_default()))).collect();
+        let stocked = files.into_iter().map(|(name, data)| (name.to_ascii_uppercase(), data)).collect();
         let mut mem = Mem::new(vm.ram());
         let mut dos = Dos::new(&mut mem, volume);
         if let Some(at_boot) = wall_clock {
@@ -387,17 +390,20 @@ impl Capsule {
         let Some(Machine { dos, .. }) = self.machine.as_ref() else { return changes };
         let volume = dos.volume();
         for name in volume.names() {
+            if volume.untouched(name) {
+                continue;
+            }
             let data = volume.get(name).unwrap_or_default();
-            let hash = fnv1a(data);
-            if !self.stocked.iter().any(|(n, h)| n == name && *h == hash) {
-                log!("file capsule={} name={name} size={} fnv1a={hash:08x}", self.id, data.len());
-                changes.written.push((name.to_string(), data.to_vec()));
+            let was = self.stocked.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone());
+            if was.as_deref() != Some(data) {
+                log!("file capsule={} name={name} size={} fnv1a={:08x}", self.id, data.len(), fnv1a(data));
+                changes.written.push((name.to_string(), data.to_vec(), was));
             }
         }
-        for (name, _) in &self.stocked {
+        for (name, was) in &self.stocked {
             if volume.get(name).is_none() {
                 log!("file capsule={} name={name} deleted=yes", self.id);
-                changes.deleted.push(name.clone());
+                changes.deleted.push((name.clone(), was.clone()));
             }
         }
         changes
@@ -479,11 +485,16 @@ impl Capsule {
     }
 }
 
+/// A file a program wrote: name, new contents, and what the program started with.
+pub type Written = (String, Vec<u8>, Option<Rc<[u8]>>);
+
 /// What a finished capsule's program left different on its drive C:.
 #[derive(Default)]
 pub struct Changes {
-    pub written: Vec<(String, Vec<u8>)>,
-    pub deleted: Vec<String>,
+    /// Name, new contents, and the contents the program started with (none if new).
+    pub written: Vec<Written>,
+    /// Name and the contents the program started with.
+    pub deleted: Vec<(String, Rc<[u8]>)>,
 }
 
 /// 32-bit FNV-1a: a cheap content fingerprint for the log.
